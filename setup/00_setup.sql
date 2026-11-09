@@ -1,16 +1,15 @@
 -- =====================================================================
 -- 00_setup.sql
--- 検証用のロール・ウェアハウス・DB/スキーマと権限を作成する
+-- 検証用のロール・ウェアハウス・DB と、SaaSサポート版のスキーマを作成する
 -- 実行ロール: ACCOUNTADMIN(またはロール/WH/DB作成権限を持つロール)
+-- 需要予測版(archive_demand_forecast)を実行済みでもそのまま流せる(冪等)
 -- =====================================================================
 
 USE ROLE ACCOUNTADMIN;
 
--- ---------- 名前の設定(必要に応じて変更) ----------
 SET pipe_role = 'DECISION_PIPE_ROLE';
 SET pipe_wh   = 'DECISION_PIPE_WH';
 SET pipe_db   = 'DECISION_PIPE_DB';
-SET pipe_sch  = 'DECISION_PIPE_DB.DEMO';
 SET my_user   = CURRENT_USER();
 
 -- ---------- ロール ----------
@@ -27,29 +26,26 @@ CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER($pipe_wh)
   INITIALLY_SUSPENDED = TRUE;
 GRANT USAGE, OPERATE ON WAREHOUSE IDENTIFIER($pipe_wh) TO ROLE IDENTIFIER($pipe_role);
 
--- ---------- DB / スキーマ(所有権を検証ロールへ) ----------
+-- ---------- DB(所有権を検証ロールへ) ----------
 CREATE DATABASE IF NOT EXISTS IDENTIFIER($pipe_db);
 GRANT OWNERSHIP ON DATABASE IDENTIFIER($pipe_db) TO ROLE IDENTIFIER($pipe_role) COPY CURRENT GRANTS;
 
-USE ROLE IDENTIFIER($pipe_role);
-CREATE SCHEMA IF NOT EXISTS IDENTIFIER($pipe_sch);
-USE ROLE ACCOUNTADMIN;
-
--- スキーマ所有者は CREATE TASK / CREATE AGENT / CREATE SEMANTIC VIEW /
--- CREATE PROCEDURE / CREATE DCM PROJECT をすべて持つため個別付与は不要。
--- タスクの実行(Pipeline Builder の Deploy 後の実行)にはアカウント権限が必要。
+-- タスク実行(Pipeline Builder の Deploy 後の実行)に必要なアカウント権限
 GRANT EXECUTE TASK ON ACCOUNT TO ROLE IDENTIFIER($pipe_role);
 
--- Cortex AI 関数(AI_COMPLETE)と Cortex Agents の利用権限
+-- AI_COMPLETE / Cortex Search / Cortex Agents の利用権限
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE IDENTIFIER($pipe_role);
 
--- ---------- (任意)クロスリージョン推論 ----------
--- 使いたいモデルが自リージョンで提供されていない場合のみ有効化する。
--- 組織のデータ所在ポリシーを確認してから実行すること。
+-- (任意)使いたいモデルが自リージョンで提供されていない場合のみ。データ所在ポリシーを確認してから
 -- ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
 
--- ---------- 確認 ----------
+-- ---------- スキーマ ----------
+-- スキーマ所有者は CREATE TASK / AGENT / SEMANTIC VIEW / CORTEX SEARCH SERVICE /
+-- PROCEDURE / DCM PROJECT をすべて持つため、個別付与は不要
 USE ROLE IDENTIFIER($pipe_role);
+CREATE SCHEMA IF NOT EXISTS DECISION_PIPE_DB.SUPPORT
+  COMMENT = 'SaaSカスタマーサポート版';
+
 USE WAREHOUSE IDENTIFIER($pipe_wh);
-USE SCHEMA IDENTIFIER($pipe_sch);
+USE SCHEMA DECISION_PIPE_DB.SUPPORT;
 SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE(), CURRENT_SCHEMA();
