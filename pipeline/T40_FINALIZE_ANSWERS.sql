@@ -1,6 +1,7 @@
 -- =====================================================================
 -- T40_FINALIZE_ANSWERS  [通常]
--- auto の定型回答を生成し、回答案を品質チェックして送信可 / 担当者行きを確定。戻り値: REVIEW_NEEDED / OK
+-- auto の定型回答を生成し、回答案を decider-2b で品質チェック(失敗時は汎用LLM)して送信可 / 担当者行きを確定。
+-- 戻り値: REVIEW_NEEDED / OK
 --
 -- Pipeline Builder の設定(Task タブ > Dependencies)
 --   Predecessors          : T20_ROUTE, T30_AGENT_ANSWER, T31_OVERFLOW_TO_HUMAN, T35_AGENT_FAILED

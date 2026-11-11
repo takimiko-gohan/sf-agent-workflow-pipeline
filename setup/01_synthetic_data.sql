@@ -205,6 +205,32 @@ SELECT * FROM VALUES
   ('KB018', 'security_privacy', 'データの保持と削除',
    '解約後のデータは90日間保持され、その後自動的に削除されます。即時の完全削除や削除証明書の発行を希望する場合は、本人確認と管理者の承認が必要なため、サポート担当者が個別に対応します。');
 
+-- 判定モデル decider-2b は英語で学習されているため、選択肢に使う英語タイトルも持たせる
+ALTER TABLE KB_ARTICLES ADD COLUMN TITLE_EN VARCHAR;
+UPDATE KB_ARTICLES k
+   SET TITLE_EN = v.TITLE_EN
+  FROM (SELECT * FROM VALUES
+    ('KB001', 'Reset your password'),
+    ('KB002', 'Set up two-factor authentication (2FA) and what to do when a device is lost'),
+    ('KB003', 'Invite members and assign roles'),
+    ('KB004', 'Add or remove seats and how billing changes'),
+    ('KB005', 'Limits and prices of each plan'),
+    ('KB006', 'Download invoices and change the billing name'),
+    ('KB007', 'Change the payment method (card or invoice payment)'),
+    ('KB008', 'API rate limits and HTTP 429 errors'),
+    ('KB009', 'Issue and revoke API keys'),
+    ('KB010', 'Set up SSO (SAML)'),
+    ('KB011', 'Export data'),
+    ('KB012', 'Restore deleted tasks'),
+    ('KB013', 'Notification emails are not arriving'),
+    ('KB014', 'Set up the Slack integration'),
+    ('KB015', 'File attachment size limits'),
+    ('KB016', 'Check service status and outages'),
+    ('KB017', 'Cancel or downgrade the plan'),
+    ('KB018', 'Data retention and deletion')
+  ) v (KB_ID, TITLE_EN)
+ WHERE k.KB_ID = v.KB_ID;
+
 -- =====================================================================
 -- 7. 問い合わせのテンプレート
 --    TRUE_RESOLUTION: kb     = ヘルプ記事だけで回答できる

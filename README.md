@@ -10,7 +10,11 @@
 
 auto と agent の回答も品質チェックにかけます。基準を満たさないものは、下書きを付けて human に回します。
 
-パイプラインの構成(分岐・フォールバック・ファイナライザー)は需要予測版と同じです。需要予測版は `archive_demand_forecast/` に移しました。
+分類と品質チェックには、オープンウェイトの判定モデル **decider-2b**(jev-class decision model、Apache-2.0)を使います。Model Registry に登録し、SPCS のサービスとして SQL から呼び出します。decider-2b は選択肢ごとの確率を返すので、振り分けの閾値を確率で決められます。
+
+Snowflake 純正の `snowflake-decision`(AI_COMPLETE)は Private Preview のため、この検証では使いません。
+
+decider-2b が使えないとき(サービスの停止など)は、T11 が汎用LLMで分類し直します。品質チェックも、プロシージャの中で汎用LLMに切り替わります。
 
 ---
 
@@ -20,7 +24,7 @@ auto と agent の回答も品質チェックにかけます。基準を満た�
 flowchart TD
   T00["T00_PICK_BATCH<br/>(root)<br/>戻り値: HAS_TICKETS / NO_TICKETS"]
   T05["T05_NO_TICKETS<br/>空振りログ"]
-  T10["T10_CLASSIFY<br/>snowflake-decision で分類"]
+  T10["T10_CLASSIFY<br/>decider-2b で分類"]
   T11["T11_CLASSIFY_FALLBACK<br/>汎用LLMで分類"]
   T20["T20_ROUTE<br/>auto / agent / human<br/>戻り値: ALL_AUTO / AGENT / AGENT_OVERFLOW"]
   T30["T30_AGENT_ANSWER<br/>エージェントが回答案を作成"]
@@ -47,7 +51,9 @@ flowchart TD
 
 ### 判定の中身
 
-**T10:分類(snowflake-decision、1回の呼び出しで4項目)**
+**T10:分類(decider-2b の `DECIDER_2B_SVC!SYSTEM_ONE`、1回の呼び出しで4項目)**
+
+decider-2b は英語で学習されたモデルです。そのため、質問文と選択肢(ヘルプ記事の英語タイトル `TITLE_EN` を含む)は英語にし、問い合わせ本文は日本語のまま渡しています。
 
 | 項目 | タイプ | 内容 |
 |---|---|---|
@@ -61,7 +67,9 @@ flowchart TD
 - **auto**:記事が特定でき(確信度 ≥ 0.8)、かつ `needs_account_data` < 0.3
 - **agent**:上記以外
 
-**T40:品質チェック(snowflake-decision、失敗したら汎用LLM)**
+**T40:品質チェック(decider-2b、失敗したら汎用LLM)**
+
+問い合わせ・返信案・参照情報を JSON オブジェクトにまとめて、STATE として渡します。
 
 | 項目 | タイプ | 送信可の基準 |
 |---|---|---|
@@ -82,23 +90,64 @@ flowchart TD
 | `setup/02_search_semantic_view_agent.sql` | ワークシートで1回 | Cortex Search(ヘルプ記事)、セマンティックビュー(顧客データ)、回答エージェント |
 | `setup/03_pipeline_objects.sql` | ワークシートで1回 | 設定値・出力テーブル・確認用ビュー |
 | `setup/04_procedures.sql` | ワークシートで1回 | 各カードから呼ぶプロシージャ |
+| `setup/05_decider_model.sql` | ワークシート + 手元のPC | decider-2b 用のコンピュートプール・外部アクセス・イメージリポジトリ、サービスの確認・停止 |
 | `pipeline/T*.sql` | GUI の SQL カード | 1カード1ファイル。冒頭コメントに依存関係と条件を記載 |
 | `pipeline/scenarios.sql` | ワークシート | 検証シナリオの切り替え |
 | `pipeline/inspect.sql` | ワークシート | 経路・回答・担当者キュー・評価指標の確認 |
-| `setup/99_teardown.sql` | 検証後に1回 | `SUPPORT` スキーマを削除 |
-| `archive_demand_forecast/` | - | 需要予測版(参考) |
+| `setup/99_teardown.sql` | 検証後に1回 | decider-2b のサービス・モデル・プールと `SUPPORT` スキーマを削除 |
 
 ---
 
 ## 手順
 
+### A. Snowflake のリソースを作る
+
 1. `setup/00` から `04` までを順にワークシートで実行する。
    - `02` の Cortex Search はインデックスの作成に少し時間がかかります。動作確認の `SEARCH_PREVIEW` が空なら、少し待ってから再実行してください。
    - `02` の最後の `DATA_AGENT_RUN` で、エージェントが顧客データを照会して回答することを確認してください。
-2. Workspaces で、**DECISION_PIPE_ROLE が所有する共有ワークスペース**に `pipeline/` を置く。
-3. Pipeline Builder を作成する(DCM プロジェクトの配置先は `DECISION_PIPE_DB.SUPPORT`)。
-4. 下表のとおりカードを置いてつなぎ、条件を設定する。カード名は**表のとおり大文字で**付けてください(戻り値を参照する条件はタスク名の大文字・小文字まで一致させる必要があります)。
-5. グラフの設定を行う。
+### B. decider-2b を登録してサービスを起動する
+
+公式サンプル [Snowflake-Labs/decision-models-in-snowflake-model-registry](https://github.com/Snowflake-Labs/decision-models-in-snowflake-model-registry) のスクリプトを、作成先だけ変えてそのまま使います。
+
+1. `setup/05_decider_model.sql` の **[1]** をワークシートで実行する(ACCOUNTADMIN が必要です)。
+   - GPU プール(`GPU_NV_S`、A10G x1)とビルド用の CPU プールを作ります。
+   - あわせて、イメージビルド用の外部アクセス(PyPI / PyTorch のみ)とイメージリポジトリを作ります。
+   - `GPU_NV_S` が使えないリージョンでは、ここで失敗します。
+2. 手元の PC で公式サンプルを実行する。必要なもの:Python 3.12、Snowflake CLI の接続(**既定ロールを `DECISION_PIPE_ROLE` にする**)、約5GBの空き容量。
+
+```bash
+git clone https://github.com/Snowflake-Labs/decision-models-in-snowflake-model-registry
+cd decision-models-in-snowflake-model-registry
+python3.12 -m venv .venv && .venv/bin/pip install -r python/requirements.txt
+
+# 重み(Mapika/decider-2b、リビジョン固定)をダウンロード
+.venv/bin/hf download Mapika/decider-2b --revision 533964dae8be954c5b5e19fa4948e48408094c1e \
+  --local-dir models/decider-2b
+
+# 作成先をこのキットのスキーマに向ける
+export SNOWFLAKE_CONNECTION_NAME=<DECISION_PIPE_ROLE を既定ロールにした接続名>
+export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
+
+.venv/bin/python python/log_model.py        # DECIDER_2B(バージョン SERVICE)を登録
+.venv/bin/python python/create_service.py   # DECIDER_2B_SVC を起動(約15分)
+```
+
+   Windows の PowerShell の場合は、次のように読み替えてください。
+   - `.venv/bin/` → `.venv\Scripts\`
+   - `export A=B` → `$env:A = "B"`
+   - 行末の `\` → 1行にまとめる
+
+   サンプルの動作確認は macOS / Linux で行われています。Windows で依存関係のインストールに失敗する場合は、WSL を使ってください。
+3. `setup/05_decider_model.sql` の **[2]** を実行する。サービスの状態が `READY` になり、日本語の問い合わせ1件に `answers` が返ることを確認してください。
+
+> **費用に注意**:サービスは最小1インスタンスで起動したままになるため、GPU プールが常時課金されます。検証しない間は `05_decider_model.sql` の **[3]** でサービスとプールを止めてください。
+
+### C. パイプラインを組んで実行する
+
+1. Workspaces で、**DECISION_PIPE_ROLE が所有する共有ワークスペース**に `pipeline/` を置く。
+2. Pipeline Builder を作成する(DCM プロジェクトの配置先は `DECISION_PIPE_DB.SUPPORT`)。
+3. 下表のとおりカードを置いてつなぎ、条件を設定する。カード名は**表のとおり大文字で**付けてください(戻り値を参照する条件はタスク名の大文字・小文字まで一致させる必要があります)。
+4. グラフの設定を行う。
 
 | 設定 | 値 |
 |---|---|
@@ -108,7 +157,7 @@ flowchart TD
 | リトライ | 0 |
 | Finalizer | `T99_RUN_SUMMARY` |
 
-6. Deploy し、`scenarios.sql` でシナリオを切り替えながら Run して、`inspect.sql` で確認する。
+5. Deploy し、`scenarios.sql` でシナリオを切り替えながら Run して、`inspect.sql` で確認する。
 
 ### カードの設定
 
@@ -133,7 +182,7 @@ flowchart TD
 | シナリオ(`SP_SET_SCENARIO`) | 期待する経路 |
 |---|---|
 | `normal` | T00 → T10 → T20 → T30 → T40 → T50 → T99 |
-| `classify_down` | T10 **失敗** → **T11** → T20 → …(snowflake-decision 未有効化のアカウントでは normal でもこの経路) |
+| `classify_down` | T10(decider-2b)**失敗** → **T11**(汎用LLM)→ T20 → …(`DECIDER_2B_SVC` が無い・起動していない場合は normal でもこの経路) |
 | `agent_down` | T30 **失敗** → **T35** → T40(agent の行は human)→ T50 |
 | `overflow` | T20 (AGENT_OVERFLOW) → **T30 と T31 が並列** → T40 → T50 |
 | `drained` | T00 (NO_TICKETS) → **T05** → T99(日曜でチケット0件の日も同じ) |
@@ -178,6 +227,11 @@ flowchart TD
 | `kb_match` | 定型回答で選んだヘルプ記事が正解と一致した割合 | - |
 | `fact_hit` | 顧客データが必要な問い合わせの回答に、正しい値(金額・上限・復旧時刻など)が含まれた割合 | - |
 
+`inspect.sql` の 11〜14 は、decider-2b の確率そのものを見るためのクエリです。
+- **11・12(確率の較正)**:確率の帯ごとに、実際の正解率と比べます。
+- **13(閾値の比較)**:`human_min` の候補ごとに、取りこぼしと人手送りの件数を比べます。
+- **14(処理時間)**:1件あたりの処理時間と入力トークン数を見ます。
+
 `fact_hit` は、回答の文字列に期待値が含まれるかだけを見る簡易判定です。「1万回」のような表記の揺れは不一致として数えます。
 
 ## 調整ポイント(`PIPELINE_CONFIG`)
@@ -190,7 +244,7 @@ flowchart TD
 | `agent_max_rows` | 5 | 1回でエージェントに回す上限件数 |
 | `agent_error_max` | 0.50 | エージェント呼び出しの失敗率の上限 |
 | `quality_min` / `resolves_min` / `risk_max` | 1.20 / 0.50 / 0.50 | 送信可の基準 |
-| `use_decision_for_quality` | 1 | 品質チェックで snowflake-decision を試す |
+| `use_decider_for_quality` | 1 | 品質チェックで decider-2b を試す |
 
 安全側に倒したい場合は `human_min` を下げ、自動化率を上げたい場合は `auto_conf_min` を下げます。どちらも `unsafe_automation` と見比べながら調整してください。
 
@@ -200,15 +254,16 @@ flowchart TD
 
 手元では実行できていないため、実機で次の点を確認してください。
 
-**最初に確認したいこと**
+**decider-2b について**
+- **日本語の精度**:decider-2b のモデルカードは英語のみ対応としています。質問文は英語にしていますが、問い合わせ本文は日本語です。`inspect.sql` の 8 と 11 で、分類の正解率と確率の較正を必ず確認してください。精度が足りない場合は、問い合わせ本文を英訳してから渡す前処理(`AI_TRANSLATE` など)を T10 の前に入れることを検討してください。
+- **choice の確信度**:`confidence` は「最大確率を一様分布で0、1つに集中で1になるよう換算した値」です。ヘルプ記事は19択なので、`auto_conf_min = 0.8` は最大確率がおよそ0.81以上に相当します。必要に応じて調整してください。
+- **score の値**:`score` は段階の番号ではなく期待値(0〜2の小数)で返ります。`quality_min = 1.2` はこの期待値に対する閾値です。
+- **戻り値の取り出し方**:ANSWER_JSON の取り出し方は、`decider-ai` 1.6.0 のソース(`systemone.py`)で確認した形式です。サービス関数の戻り値から `out:ANSWER_JSON` を取り出す方法は、公式サンプルの SQL に合わせています。初回は `CLASSIFY_RESULTS.RAW` を見てください。
+- **費用**:GPU プール(GPU_NV_S)は、サービスが起動している間ずっと課金されます。
+
+**パイプライン全般**
 - **プロシージャ内からの戻り値設定**:`SYSTEM$SET_RETURN_VALUE` をプロシージャ(caller's rights)の中から呼んでいます。`inspect.sql` の 2 で、`RETURN_VALUE` に値が入っているか確認してください。
-- **`<>` による条件(T30)**:通らない場合は、T30 の条件を `= 'AGENT' OR ... = 'AGENT_OVERFLOW'` に変更してください。
-- **snowflake-decision の出力形式**:`choice` の選択肢を動的に組み立てた場合の挙動と、`score` が段階の番号(0〜2)で返るかどうかは、Private Preview のドキュメントで確認してください。初回は `CLASSIFY_RESULTS.RAW` と `FINAL_RESULTS.QUALITY_RAW` を見てください。
-
-**環境に応じて変更が必要なもの**
-- **埋め込みモデル**:`snowflake-arctic-embed-l-v2.0` は多言語対応のモデルとして指定しています。リージョンで使えない場合は外してください(既定のモデルは英語向けなので、日本語の検索精度は落ちます)。
-- **汎用LLMのモデル名(`claude-sonnet-5`)**:アカウントやリージョンで使えるものに置き換えてください。`04_procedures.sql` の中で一括置換できます。
-
-**その他**
+- **`<>` による条件(T30)**:通らない場合は、`= 'AGENT' OR ... = 'AGENT_OVERFLOW'` に変更してください。
+- **埋め込みモデル**:`snowflake-arctic-embed-l-v2.0` を指定しています。リージョンで使えない場合は外してください。
+- **汎用LLMのモデル名(`claude-sonnet-5`)**:アカウントやリージョンで使えるものに置き換えてください。
 - **障害時のグラフの表示**:フォールバックで処理が完了しても、グラフ実行全体は失敗として表示される可能性があります。
-- **費用**:エージェントは1件あたり数十秒〜2分程度かかり、ウェアハウスと AI の費用が発生します。`agent_max_rows` で上限を設けています。

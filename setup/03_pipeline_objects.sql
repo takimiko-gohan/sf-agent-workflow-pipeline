@@ -24,8 +24,8 @@ INSERT INTO PIPELINE_CONFIG VALUES
   ('quality_min',              1.20, '回答の根拠スコア(0〜2)がこれ以上なら送信可'),
   ('resolves_min',             0.50, '質問に答えている確率がこれ以上なら送信可'),
   ('risk_max',                 0.50, '承認が必要な内容を含む確率がこれ未満なら送信可'),
-  ('use_decision_for_quality', 1,    '1=品質チェックに snowflake-decision を使う(失敗時は自動で汎用LLM)/0=汎用LLMのみ'),
-  ('force_classify_failure',   0,    '1 にすると分類(T10)を強制失敗させる(フォールバック検証用)'),
+  ('use_decider_for_quality',  1,    '1=品質チェックに decider-2b を使う(失敗時は自動で汎用LLM)/0=汎用LLMのみ'),
+  ('force_classify_failure',   0,    '1 にすると decider-2b での分類(T10)を強制失敗させる(フォールバック検証用)'),
   ('force_agent_failure',      0,    '1 にするとエージェント(T30)を強制失敗させる');
 
 CREATE OR REPLACE FUNCTION CFG(K VARCHAR)

@@ -96,3 +96,58 @@ JOIN TICKET_LABELS l   USING (TICKET_ID)
 JOIN ROUTED_TICKETS r  USING (TICKET_ID)
 JOIN SUPPORT_TICKETS t USING (TICKET_ID)
 WHERE l.TRUE_RESOLUTION = 'human' AND f.FINAL_ROUTE IN ('auto', 'agent');
+
+-- =====================================================================
+-- 判定モデル(decider-2b)の確率を見る
+-- =====================================================================
+
+-- 11. 確率の較正: 要担当者の確率(HUMAN_PROB)の帯ごとに、実際に要担当者だった割合
+--     確率どおりに当たっていれば、avg_prob と actual_rate が近い値になる。
+--     human_min(既定 0.5)をどこに置けば unsafe_automation を0にできるかの判断材料
+SELECT
+  c.CLASSIFY_MODEL,
+  FLOOR(c.HUMAN_PROB * 10) / 10                                          AS prob_bucket,
+  COUNT(*)                                                               AS n,
+  ROUND(AVG(c.HUMAN_PROB), 3)                                            AS avg_prob,
+  ROUND(AVG(IFF(l.TRUE_RESOLUTION = 'human', 1, 0)), 3)                  AS actual_rate
+FROM CLASSIFY_RESULTS c
+JOIN TICKET_LABELS l USING (TICKET_ID)
+WHERE c.HUMAN_PROB IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- 12. 同じく、顧客データが必要な確率(ACCOUNT_DATA_PROB)の較正
+SELECT
+  c.CLASSIFY_MODEL,
+  FLOOR(c.ACCOUNT_DATA_PROB * 10) / 10                                   AS prob_bucket,
+  COUNT(*)                                                               AS n,
+  ROUND(AVG(c.ACCOUNT_DATA_PROB), 3)                                     AS avg_prob,
+  ROUND(AVG(IFF(l.TRUE_RESOLUTION = 'lookup', 1, 0)), 3)                 AS actual_rate
+FROM CLASSIFY_RESULTS c
+JOIN TICKET_LABELS l USING (TICKET_ID)
+WHERE c.ACCOUNT_DATA_PROB IS NOT NULL AND l.TRUE_RESOLUTION <> 'human'
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- 13. 閾値を動かしたらどうなるか(human_min の候補ごとの取りこぼしと人手送り)
+SELECT
+  th.v                                                                    AS human_min,
+  COUNT_IF(l.TRUE_RESOLUTION = 'human' AND c.HUMAN_PROB <  th.v)          AS missed_human,     -- 0 にしたい
+  COUNT_IF(l.TRUE_RESOLUTION <> 'human' AND c.HUMAN_PROB >= th.v)         AS extra_to_human,   -- 少ないほど効率的
+  COUNT(*)                                                                AS n
+FROM CLASSIFY_RESULTS c
+JOIN TICKET_LABELS l USING (TICKET_ID)
+CROSS JOIN (SELECT * FROM VALUES (0.2), (0.3), (0.4), (0.5), (0.6), (0.7)) th (v)
+WHERE c.CLASSIFY_MODEL = 'decider-2b'
+GROUP BY th.v
+ORDER BY th.v;
+
+-- 14. decider-2b の処理時間と入力トークン(1件あたり、サービス内の時間)
+SELECT
+  COUNT(*)                                                                AS n,
+  ROUND(MEDIAN(RAW:elapsed_ms::FLOAT), 1)                                 AS median_ms,
+  ROUND(APPROX_PERCENTILE(RAW:elapsed_ms::FLOAT, 0.95), 1)                AS p95_ms,
+  ROUND(AVG(RAW:input_tokens::INT))                                       AS avg_input_tokens,
+  COUNT_IF(RAW:answer:error IS NOT NULL)                                  AS row_errors
+FROM CLASSIFY_RESULTS
+WHERE CLASSIFY_MODEL = 'decider-2b';

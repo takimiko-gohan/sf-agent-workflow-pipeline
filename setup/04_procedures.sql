@@ -95,13 +95,14 @@ $$;
 
 -- =====================================================================
 -- T10 / T11: 問い合わせの分類
---   METHOD = 'decision' : snowflake-decision(T10)
---   METHOD = 'llm'      : 汎用LLM + 構造化出力(T11 フォールバック)
+--   METHOD = 'decider' : decider-2b(Model Registry → SPCS サービス DECIDER_2B_SVC)(T10)
+--   METHOD = 'llm'     : 汎用LLM + 構造化出力(T11 フォールバック)
 --   1回の呼び出しで4つの判定を行う
 --     category           : 問い合わせの種類(choice)
 --     kb_article         : 回答に使えるヘルプ記事(choice。記事一覧から動的に組み立てる)
---     requires_human     : 担当者の判断・権限・調査が必要か(noul)
+--     requires_human     : 担当者の判断・権限・調査が必要か(noul = 真の確率)
 --     needs_account_data : 顧客固有のデータ確認が必要か(noul)
+--   decider-2b は英語で学習されているため、質問文と選択肢は英語にしている(問い合わせ本文は日本語のまま)
 -- =====================================================================
 CREATE OR REPLACE PROCEDURE SP_CLASSIFY(METHOD VARCHAR)
 RETURNS VARCHAR
@@ -110,78 +111,93 @@ EXECUTE AS CALLER
 AS
 $$
 DECLARE
-  forced_failure EXCEPTION (-20001, 'シナリオ classify_down による強制失敗');
+  forced_failure EXCEPTION (-20001, 'シナリオ classify_down による強制失敗(decider-2b 停止の想定)');
   all_unparsed   EXCEPTION (-20002, '分類結果を1件も解析できなかった');
-  bad_method     EXCEPTION (-20009, 'METHOD は decision か llm を指定する');
+  bad_method     EXCEPTION (-20009, 'METHOD は decider か llm を指定する');
   force_flag FLOAT;
   n_total    NUMBER DEFAULT 0;
   n_null     NUMBER DEFAULT 0;
 BEGIN
   SELECT COALESCE(CFG('force_classify_failure'), 0) INTO :force_flag;
-  IF (METHOD = 'decision' AND force_flag >= 1) THEN
+  IF (METHOD = 'decider' AND force_flag >= 1) THEN
     RAISE forced_failure;
   END IF;
 
   DELETE FROM CLASSIFY_RESULTS WHERE TICKET_ID IN (SELECT TICKET_ID FROM CURRENT_BATCH);
 
-  IF (METHOD = 'decision') THEN
+  IF (METHOD = 'decider') THEN
     INSERT INTO CLASSIFY_RESULTS
       (TICKET_ID, CLASSIFY_MODEL, CATEGORY, CATEGORY_CONF, KB_ID, KB_CONF, HUMAN_PROB, ACCOUNT_DATA_PROB, RAW)
     WITH kb AS (
-      SELECT OBJECT_INSERT(OBJECT_AGG(KB_ID, TO_VARIANT(TITLE)), 'none', '該当するヘルプ記事がない') AS criteria
+      SELECT OBJECT_INSERT(OBJECT_AGG(KB_ID, TO_VARIANT(TITLE_EN)), 'none', 'None of these articles answers the ticket') AS criteria
       FROM KB_ARTICLES
+    ),
+    q AS (
+      SELECT TO_JSON({
+        'category': {
+          'type': 'choice',
+          'instructions': 'What is this support ticket about? The category the customer picked on the form may be wrong.',
+          'criteria': {
+            'how_to':              'How to use or configure a product feature',
+            'billing':             'Invoices, payments, seat counts or plan prices',
+            'account_access':      'Login, password, two-factor authentication or SSO',
+            'api_integration':     'API usage or integrations with other services',
+            'outage_bug':          'Outages, errors or something not working',
+            'security_privacy':    'Security incidents, personal data, data deletion or legal and contract documents',
+            'cancellation_refund': 'Cancellation, downgrade or refunds',
+            'other':               'Anything else'
+          }
+        },
+        'kb_article': {
+          'type': 'choice',
+          'instructions': 'Which help-center article best answers this ticket?',
+          'criteria': kb.criteria
+        },
+        'requires_human': {
+          'type': 'noul',
+          'instructions': 'Does this ticket need the judgment, authority or investigation of a human support agent? '
+                       || 'That includes refunds, discounts, quotes or contract changes; disputes about an invoice amount; '
+                       || 'suspected unauthorized access; immediate data deletion or deletion certificates; legal documents; '
+                       || 'the only admin being locked out; errors not explained by a known outage; '
+                       || 'strong dissatisfaction or a threat to cancel.',
+          'criteria': {'true': 'A human agent must handle it', 'false': 'Documented information is enough to answer'}
+        },
+        'needs_account_data': {
+          'type': 'noul',
+          'instructions': 'Does answering require data specific to this customer, such as their plan, seat counts, '
+                       || 'invoices, API usage, or whether an outage affected them?',
+          'criteria': {'true': 'Customer-specific data is needed', 'false': 'General information is enough'}
+        }
+      }) AS questions_json
+      FROM kb
     ),
     d AS (
       SELECT
         t.TICKET_ID,
-        TRY_PARSE_JSON(TO_VARCHAR(AI_COMPLETE(
-          model  => 'snowflake-decision',
-          prompt => TO_JSON({
-            'state': t.TICKET_TEXT,
-            'questions': {
-              'category': {
-                'type': 'choice',
-                'instructions': '問い合わせの種類はどれか(フォームで顧客が選んだ区分は誤っていることがある)',
-                'criteria': {
-                  'how_to':              '機能の使い方・設定方法',
-                  'billing':             '請求・支払い・シート数・プランの料金',
-                  'account_access':      'ログイン・パスワード・2段階認証・SSO',
-                  'api_integration':     'API・外部サービス連携',
-                  'outage_bug':          '障害・エラー・不具合',
-                  'security_privacy':    'セキュリティ・個人情報・データ削除・契約書類',
-                  'cancellation_refund': '解約・ダウングレード・返金',
-                  'other':               'その他'
-                }
-              },
-              'kb_article': {
-                'type': 'choice',
-                'instructions': 'この問い合わせに答えるのに最も適したヘルプ記事はどれか',
-                'criteria': kb.criteria
-              },
-              'requires_human': {
-                'type': 'noul',
-                'instructions': '担当者の判断・権限・調査が必要である(返金・値引き・見積もり・契約変更、請求金額への異議、不正アクセスの疑い、データの即時削除や証明書、法務文書、唯一の管理者のロックアウト、既知の障害以外の不具合調査、強い不満や解約の示唆)'
-              },
-              'needs_account_data': {
-                'type': 'noul',
-                'instructions': '回答するには、この顧客に固有のデータ(契約プラン、シート数、請求書、API利用状況、障害の影響)の確認が必要である'
-              }
-            }
-          })
-        ))) AS j
+        DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC!SYSTEM_ONE(
+          TO_JSON(TO_VARIANT(t.TICKET_TEXT)),   -- STATE_JSON: 問い合わせ本文(JSON文字列)
+          q.questions_json                      -- QUESTIONS_JSON
+        ) AS out
       FROM SUPPORT_TICKETS t
       JOIN CURRENT_BATCH b ON b.TICKET_ID = t.TICKET_ID
-      CROSS JOIN kb
+      CROSS JOIN q
+    ),
+    p AS (
+      SELECT TICKET_ID, out, TRY_PARSE_JSON(out:ANSWER_JSON::STRING) AS j FROM d
     )
-    SELECT TICKET_ID, 'snowflake-decision',
+    SELECT TICKET_ID, 'decider-2b',
            j:answers:category:choice::STRING,
            j:answers:category:confidence::FLOAT,
            j:answers:kb_article:choice::STRING,
            j:answers:kb_article:confidence::FLOAT,
            j:answers:requires_human:noul::FLOAT,
            j:answers:needs_account_data:noul::FLOAT,
-           j
-    FROM d;
+           OBJECT_CONSTRUCT_KEEP_NULL(
+             'answer',       j,                                   -- 行単位のエラーは {"error": ...}
+             'elapsed_ms',   out:ELAPSED_MS,
+             'input_tokens', out:INPUT_TOKENS,
+             'runtime',      TRY_PARSE_JSON(out:RUNTIME_JSON::STRING))
+    FROM p;
 
   ELSEIF (METHOD = 'llm') THEN
     INSERT INTO CLASSIFY_RESULTS
@@ -507,7 +523,7 @@ $$;
 --   (1) auto の行に、選ばれたヘルプ記事だけを根拠にした定型回答を生成する
 --   (2) auto とエージェントの回答案を品質チェックする
 --       grounded(根拠スコア 0〜2) / resolves(質問に答えているか) / risky(承認が必要な内容を含むか)
---       snowflake-decision を試し、失敗・解析不能なら汎用LLMに切り替える
+--       decider-2b を試し、失敗・解析不能なら汎用LLMに切り替える
 --   (3) 基準を満たすものは送信可、満たさないものは下書き付きで human にする
 --   戻り値: REVIEW_NEEDED(human あり) / OK
 -- =====================================================================
@@ -531,7 +547,7 @@ DECLARE
   n_send   NUMBER DEFAULT 0;
   rv       VARCHAR;
 BEGIN
-  SELECT COALESCE(CFG('use_decision_for_quality'), 1), CFG('quality_min'), CFG('resolves_min'),
+  SELECT COALESCE(CFG('use_decider_for_quality'), 1), CFG('quality_min'), CFG('resolves_min'),
          CFG('risk_max'), CFG('agent_max_rows')
     INTO :use_dec, :qmin, :rmin, :riskmax, :maxr;
 
@@ -594,44 +610,49 @@ BEGIN
     BEGIN
       INSERT INTO TMP_QUALITY
       SELECT TICKET_ID,
-             qj:answers:grounded:score::FLOAT,
+             qj:answers:grounded:score::FLOAT,      -- 3段階の期待値(0〜2)
              qj:answers:resolves:noul::FLOAT,
              qj:answers:risky:noul::FLOAT,
-             qj
+             OBJECT_CONSTRUCT_KEEP_NULL('answer', qj, 'elapsed_ms', out:ELAPSED_MS, 'input_tokens', out:INPUT_TOKENS)
       FROM (
-        SELECT
-          c.TICKET_ID,
-          TRY_PARSE_JSON(TO_VARCHAR(AI_COMPLETE(
-            model  => 'snowflake-decision',
-            prompt => TO_JSON({
-              'state': '問い合わせ:\n' || c.TICKET_TEXT || '\n\n返信案:\n' || c.REPLY_TEXT || '\n\n参照情報:\n' || c.REFERENCE,
-              'questions': {
-                'grounded': {
-                  'type': 'score',
-                  'instructions': '返信案の内容は参照情報で裏付けられているか',
-                  'criteria': ['裏付けがない、または参照情報と矛盾する', '一部のみ裏付けられている', 'すべて参照情報で裏付けられている']
-                },
-                'resolves': {
-                  'type': 'noul',
-                  'instructions': '返信案は顧客の質問に直接答えている'
-                },
-                'risky': {
-                  'type': 'noul',
-                  'instructions': '返信案に、返金・値引き・期日の約束、参照情報にない仕様の断定、他社や他の顧客の情報など、担当者の承認が必要な内容が含まれる'
-                }
-              }
-            })
-          ))) AS qj
-        FROM TMP_CANDIDATES c
+        SELECT TICKET_ID, out, TRY_PARSE_JSON(out:ANSWER_JSON::STRING) AS qj
+        FROM (
+          SELECT
+            c.TICKET_ID,
+            DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC!SYSTEM_ONE(
+                   -- STATE_JSON: 問い合わせ・返信案・参照情報をまとめた JSON オブジェクト
+                   TO_JSON(OBJECT_CONSTRUCT('ticket', c.TICKET_TEXT, 'draft_reply', c.REPLY_TEXT, 'reference', c.REFERENCE)),
+                   TO_JSON({
+                     'grounded': {
+                       'type': 'score',
+                       'instructions': 'Is everything in draft_reply supported by reference?',
+                       'criteria': ['Not supported, or contradicts the reference', 'Partly supported', 'Fully supported by the reference']
+                     },
+                     'resolves': {
+                       'type': 'noul',
+                       'instructions': 'Does draft_reply directly answer the question in ticket?',
+                       'criteria': {'true': 'It answers the question', 'false': 'It does not answer the question'}
+                     },
+                     'risky': {
+                       'type': 'noul',
+                       'instructions': 'Does draft_reply contain anything that needs a human agent''s approval, such as promising refunds, '
+                                    || 'discounts or dates, stating product behavior that is not in reference, '
+                                    || 'or revealing information about other customers?',
+                       'criteria': {'true': 'It needs approval', 'false': 'It is safe to send'}
+                     }
+                   })
+                 ) AS out
+          FROM TMP_CANDIDATES c
+        ) sv
       ) qd;
       SELECT COUNT(*), COUNT(SCORE) INTO :n_q, :n_scored FROM TMP_QUALITY;
-      qmodel := IFF(n_q > 0 AND n_scored = 0, 'decision_unparsed', 'snowflake-decision');
+      qmodel := IFF(n_q > 0 AND n_scored = 0, 'decider_unparsed', 'decider-2b');
     EXCEPTION
-      WHEN OTHER THEN qmodel := 'decision_failed';
+      WHEN OTHER THEN qmodel := 'decider_failed';
     END;
   END IF;
 
-  IF (qmodel <> 'snowflake-decision') THEN
+  IF (qmodel <> 'decider-2b') THEN
     DELETE FROM TMP_QUALITY;
     INSERT INTO TMP_QUALITY
     SELECT TICKET_ID,
@@ -813,7 +834,7 @@ $$;
 -- =====================================================================
 -- 検証シナリオの切り替え
 --   normal        : 通常
---   classify_down : T10 を強制失敗 → T11(フォールバック)
+--   classify_down : decider-2b での分類(T10)を強制失敗 → T11(汎用LLMでフォールバック)
 --   agent_down    : T30 を強制失敗 → T35(退避)
 --   overflow      : agent_max_rows = 1 → T31(上限超過の人手送り)
 --   drained       : 全日を処理済みにする → 次回は NO_TICKETS で T05 だけ

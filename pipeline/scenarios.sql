@@ -12,6 +12,9 @@ USE SCHEMA DECISION_PIPE_DB.SUPPORT;
 -- 受付日ごとのチケット件数(どの日を処理するかの目安)
 SELECT * FROM V_BATCH_PREVIEW ORDER BY RECEIVED_DATE;
 
+-- 前提: decider-2b のサービスが READY であること(setup/05_decider_model.sql の [2])
+SELECT SYSTEM$GET_SERVICE_STATUS('DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC');
+
 -- 0. 最初からやり直す(結果を全消去し、設定を normal に戻す)
 CALL SP_SET_SCENARIO('reset');
 
@@ -22,9 +25,9 @@ CALL SP_SET_SCENARIO('reset');
 CALL SP_SET_SCENARIO('normal');
 -- → グラフを Run
 
--- 2. 分類モデル障害: T10 を失敗させ、フォールバックに切り替わるか
+-- 2. 判定モデル障害: decider-2b での分類(T10)を失敗させ、フォールバックに切り替わるか
 --    期待: T10=FAILED → T11 → T20 → …(CLASSIFY_MODEL が llm-fallback になる)
---    ※ snowflake-decision が未有効化のアカウントでは、normal でも自然にこの経路になる
+--    ※ DECIDER_2B_SVC が存在しない・起動していない場合も、normal で自然にこの経路になる
 CALL SP_SET_SCENARIO('classify_down');
 -- → グラフを Run
 
@@ -55,7 +58,7 @@ CALL SP_SET_SCENARIO('reset');
 --   戻り値は設定されない(タスク外では無視される)ので、RETURN の文字列を見て手で分岐する
 -- ---------------------------------------------------------------------
 -- CALL SP_PICK_BATCH();
--- CALL SP_CLASSIFY('decision');        -- 失敗したら CALL SP_CLASSIFY('llm');
+-- CALL SP_CLASSIFY('decider');         -- 失敗したら CALL SP_CLASSIFY('llm');
 -- CALL SP_ROUTE();
 -- CALL SP_RUN_AGENT_BATCH();           -- ROUTE が ALL_AUTO なら不要
 -- CALL SP_ENQUEUE_REVIEW('overflow');  -- ROUTE が AGENT_OVERFLOW のときのみ
