@@ -77,9 +77,9 @@ CREATE OR REPLACE SEMANTIC VIEW SUPPORT_ACCOUNT_SV
   DIMENSIONS (
     accounts.account_id AS ACCOUNT_ID WITH SYNONYMS ('アカウントID', '顧客ID') COMMENT = 'アカウントID',
     accounts.company_name AS COMPANY_NAME WITH SYNONYMS ('会社名') COMMENT = '会社名',
-    accounts.plan_name AS PLAN WITH SYNONYMS ('契約プラン') COMMENT = '契約中のプラン',
-    accounts.account_status AS STATUS COMMENT = 'アカウントの状態(active / past_due)',
-    accounts.region AS REGION WITH SYNONYMS ('リージョン') COMMENT = '利用リージョン',
+    accounts.plan_name AS PLAN WITH SYNONYMS ('契約プラン') COMMENT = '契約中のプラン(フリー / スタンダード / ビジネス / エンタープライズ)',
+    accounts.account_status AS STATUS COMMENT = 'アカウントの状態(有効 / 支払遅延)',
+    accounts.region AS REGION WITH SYNONYMS ('リージョン', '地域') COMMENT = '利用リージョン(東日本 / 西日本)',
     accounts.payment_method AS PAYMENT_METHOD WITH SYNONYMS ('支払い方法') COMMENT = '支払い方法',
     accounts.renewal_date AS CONTRACT_RENEWAL_DATE WITH SYNONYMS ('更新日', '契約更新日') COMMENT = '契約更新日',
     plans.plan_key AS PLAN COMMENT = 'プラン名',
@@ -94,7 +94,7 @@ CREATE OR REPLACE SEMANTIC VIEW SUPPORT_ACCOUNT_SV
     incidents.started_at AS STARTED_AT WITH SYNONYMS ('発生時刻') COMMENT = '障害の発生時刻(日本時間)',
     incidents.resolved_at AS RESOLVED_AT WITH SYNONYMS ('復旧時刻') COMMENT = '障害の復旧時刻(日本時間)',
     incidents.component AS COMPONENT WITH SYNONYMS ('機能') COMMENT = '障害が起きた機能',
-    incidents.affected_region AS AFFECTED_REGION COMMENT = '影響リージョン(ALL は全リージョン)',
+    incidents.affected_region AS AFFECTED_REGION COMMENT = '影響リージョン(東日本 / 西日本 / 全リージョン)',
     incidents.severity AS SEVERITY COMMENT = '重大度',
     incidents.incident_status AS STATUS COMMENT = '障害の状態',
     incidents.summary AS SUMMARY COMMENT = '障害の概要'
@@ -106,7 +106,7 @@ CREATE OR REPLACE SEMANTIC VIEW SUPPORT_ACCOUNT_SV
     invoices.total_amount AS SUM(invoices.amount_jpy) COMMENT = '請求金額の合計'
   )
   COMMENT = 'TaskFlow の顧客データ(サポート回答用)'
-  AI_SQL_GENERATION '顧客を特定するときは account_id で絞り込む。請求月は billing_month(月初日)で比較する。';
+  AI_SQL_GENERATION '顧客を特定するときは account_id で絞り込む。請求月は billing_month(月初日)で比較する。障害の影響は affected_region が顧客のリージョンか全リージョンのものを対象にする。';
 
 -- 動作確認
 SELECT * FROM SEMANTIC_VIEW(

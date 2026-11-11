@@ -16,6 +16,8 @@ Snowflake 純正の `snowflake-decision`(AI_COMPLETE)は Private Preview のた�
 
 decider-2b が使えないとき(サービスの停止など)は、T11 が汎用LLMで分類し直します。品質チェックも、プロシージャの中で汎用LLMに切り替わります。
 
+**日本企業での利用を想定し、問い合わせ・返信・顧客データ・ヘルプ記事はすべて日本語です。** decider-2b は英語で学習されたモデルなので、パイプラインの中で `AI_TRANSLATE` を使って英訳してから渡します(T07)。返信の生成は日本語のまま行います。英訳する場合としない場合の精度は、設定1つで切り替えて比べられます。
+
 ---
 
 ## 全体像
@@ -24,7 +26,8 @@ decider-2b が使えないとき(サービスの停止など)は、T11 が汎用
 flowchart TD
   T00["T00_PICK_BATCH<br/>(root)<br/>戻り値: HAS_TICKETS / NO_TICKETS"]
   T05["T05_NO_TICKETS<br/>空振りログ"]
-  T10["T10_CLASSIFY<br/>decider-2b で分類"]
+  T07["T07_TRANSLATE<br/>AI_TRANSLATE で英訳"]
+  T10["T10_CLASSIFY<br/>decider-2b で分類(英訳を入力)"]
   T11["T11_CLASSIFY_FALLBACK<br/>汎用LLMで分類"]
   T20["T20_ROUTE<br/>auto / agent / human<br/>戻り値: ALL_AUTO / AGENT / AGENT_OVERFLOW"]
   T30["T30_AGENT_ANSWER<br/>エージェントが回答案を作成"]
@@ -35,7 +38,8 @@ flowchart TD
   T99["T99_RUN_SUMMARY<br/>(finalizer)<br/>経路・サマリ記録"]
 
   T00 -- "= NO_TICKETS" --> T05
-  T00 -- "= HAS_TICKETS" --> T10
+  T00 -- "= HAS_TICKETS" --> T07
+  T07 --> T10
   T10 -- "All failed" --> T11
   T10 --> T20
   T11 --> T20
@@ -53,7 +57,13 @@ flowchart TD
 
 **T10:分類(decider-2b の `DECIDER_2B_SVC!SYSTEM_ONE`、1回の呼び出しで4項目)**
 
-decider-2b は英語で学習されたモデルです。そのため、質問文と選択肢(ヘルプ記事の英語タイトル `TITLE_EN` を含む)は英語にし、問い合わせ本文は日本語のまま渡しています。
+decider-2b は英語で学習されたモデルです。質問文は英語で書き、問い合わせ本文とヘルプ記事のタイトルは T07 で英訳したものを渡します。
+
+**T07:英訳(`AI_TRANSLATE(text, 'ja', 'en')`)**
+- 今回のバッチの問い合わせを英訳し、`TICKET_TRANSLATIONS` に保存します。
+- ヘルプ記事のタイトルは、未翻訳のものだけ英訳して `KB_TRANSLATIONS` に蓄積します。
+- 翻訳に失敗した行は日本語のまま T10 に渡し、`CLASSIFY_RESULTS.INPUT_LANG` に `ja` と記録します。翻訳全体が失敗しても T07 は成功扱いにして、分類を止めません。
+- `translate_for_decider = 0` にすると英訳せずに日本語のまま渡すので、翻訳の効果を比べられます。
 
 | 項目 | タイプ | 内容 |
 |---|---|---|
@@ -69,7 +79,7 @@ decider-2b は英語で学習されたモデルです。そのため、質問文
 
 **T40:品質チェック(decider-2b、失敗したら汎用LLM)**
 
-問い合わせ・返信案・参照情報を JSON オブジェクトにまとめて、STATE として渡します。
+問い合わせ・返信案・参照情報を英訳し(問い合わせは T07 の英訳を再利用)、JSON オブジェクトにまとめて STATE として渡します。
 
 | 項目 | タイプ | 送信可の基準 |
 |---|---|---|
@@ -165,7 +175,8 @@ export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
 |---|---|---|---|
 | `T00_PICK_BATCH` | (root) | - | - |
 | `T05_NO_TICKETS` | T00 | All succeeded | `SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T00_PICK_BATCH') = 'NO_TICKETS'` |
-| `T10_CLASSIFY` | T00 | All succeeded | `SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T00_PICK_BATCH') = 'HAS_TICKETS'` |
+| `T07_TRANSLATE` | T00 | All succeeded | `SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T00_PICK_BATCH') = 'HAS_TICKETS'` |
+| `T10_CLASSIFY` | T07 | All succeeded | - |
 | `T11_CLASSIFY_FALLBACK` | T10 | **All failed** | - |
 | `T20_ROUTE` | T10, T11 | **At least one succeeded** | - |
 | `T30_AGENT_ANSWER` | T20 | All succeeded | `SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T20_ROUTE') <> 'ALL_AUTO'` |
@@ -181,26 +192,27 @@ export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
 
 | シナリオ(`SP_SET_SCENARIO`) | 期待する経路 |
 |---|---|
-| `normal` | T00 → T10 → T20 → T30 → T40 → T50 → T99 |
+| `normal` | T00 → T07 → T10 → T20 → T30 → T40 → T50 → T99 |
 | `classify_down` | T10(decider-2b)**失敗** → **T11**(汎用LLM)→ T20 → …(`DECIDER_2B_SVC` が無い・起動していない場合は normal でもこの経路) |
 | `agent_down` | T30 **失敗** → **T35** → T40(agent の行は human)→ T50 |
 | `overflow` | T20 (AGENT_OVERFLOW) → **T30 と T31 が並列** → T40 → T50 |
 | `drained` | T00 (NO_TICKETS) → **T05** → T99(日曜でチケット0件の日も同じ) |
+| `translate_for_decider = 0` | 経路は normal と同じ。T07 は何もせず、decider-2b に日本語のまま渡す(`inspect.sql` の 15 で英訳ありと比べる) |
 | Config `batch_mode: all` | 未処理日をまとめて処理(overflow になりやすい) |
 
 ---
 
 ## 合成データ
 
-すべて架空のデータで、Snowflake 上で生成します。HASH ベースの乱数なので、何度生成しても同じ結果になります。
+すべて架空のデータで、Snowflake 上で生成します。HASH ベースの乱数なので、何度生成しても同じ結果になります。日本企業向けのサービスを想定し、値はすべて日本語です(列名と、評価用の分類コードは英字のまま)。
 
 | テーブル | 内容 |
 |---|---|
-| `DIM_ACCOUNT` | 顧客40社(プラン、契約・利用シート数、支払い方法、リージョン、更新日) |
-| `PLAN_LIMITS` | Free / Standard / Business / Enterprise の上限と料金 |
+| `DIM_ACCOUNT` | 顧客40社(プラン、契約・利用シート数、状態(有効 / 支払遅延)、支払い方法、リージョン(東日本 / 西日本)、更新日) |
+| `PLAN_LIMITS` | フリー / スタンダード / ビジネス / エンタープライズ の上限と料金 |
 | `FACT_INVOICE` | 有料プランの請求書(2026年5〜9月分、支払済み / 未払い / 支払期限超過) |
 | `FACT_API_USAGE_DAILY` | 10月のAPI利用。約3割の顧客で上限超過(429)が発生 |
-| `INCIDENTS` | 障害4件(ファイル添付、通知メール、JP-Westのログイン、API) |
+| `INCIDENTS` | 障害4件(ファイル添付、通知メール、西日本リージョンのログイン、API) |
 | `KB_ARTICLES` | ヘルプ記事18本(エージェントの検索対象・定型回答の根拠) |
 | `SUPPORT_TICKETS` | 2026-10-02〜10-31 のチケット約220件(平日6〜13件、土日0〜2件) |
 | `TICKET_LABELS` | 正解ラベル(評価専用。検索サービス・セマンティックビュー・エージェントからは参照できない) |
@@ -227,6 +239,8 @@ export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
 | `kb_match` | 定型回答で選んだヘルプ記事が正解と一致した割合 | - |
 | `fact_hit` | 顧客データが必要な問い合わせの回答に、正しい値(金額・上限・復旧時刻など)が含まれた割合 | - |
 
+`inspect.sql` の 15・16 は翻訳の確認です。15 では、decider-2b に渡した言語(英訳 / 日本語)ごとに、分類・記事選択の正解率と要担当者の確率の分かれ方を比べます。16 では、翻訳の失敗件数と訳文のサンプルを見ます。
+
 `inspect.sql` の 11〜14 は、decider-2b の確率そのものを見るためのクエリです。
 - **11・12(確率の較正)**:確率の帯ごとに、実際の正解率と比べます。
 - **13(閾値の比較)**:`human_min` の候補ごとに、取りこぼしと人手送りの件数を比べます。
@@ -245,6 +259,7 @@ export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
 | `agent_error_max` | 0.50 | エージェント呼び出しの失敗率の上限 |
 | `quality_min` / `resolves_min` / `risk_max` | 1.20 / 0.50 / 0.50 | 送信可の基準 |
 | `use_decider_for_quality` | 1 | 品質チェックで decider-2b を試す |
+| `translate_for_decider` | 1 | decider-2b に渡す前に英訳する(0 で日本語のまま) |
 
 安全側に倒したい場合は `human_min` を下げ、自動化率を上げたい場合は `auto_conf_min` を下げます。どちらも `unsafe_automation` と見比べながら調整してください。
 
@@ -255,7 +270,8 @@ export DECIDER_BENCH_DATABASE=DECISION_PIPE_DB DECIDER_BENCH_SCHEMA=SUPPORT
 手元では実行できていないため、実機で次の点を確認してください。
 
 **decider-2b について**
-- **日本語の精度**:decider-2b のモデルカードは英語のみ対応としています。質問文は英語にしていますが、問い合わせ本文は日本語です。`inspect.sql` の 8 と 11 で、分類の正解率と確率の較正を必ず確認してください。精度が足りない場合は、問い合わせ本文を英訳してから渡す前処理(`AI_TRANSLATE` など)を T10 の前に入れることを検討してください。
+- **翻訳を挟んだときの精度**:decider-2b のモデルカードは英語のみ対応としているため、T07 で英訳してから渡しています。英訳の品質(固有名詞や「シート」などの製品用語の訳し方)が判定に影響します。`inspect.sql` の 15・16 で、訳文と、英訳なしの場合との差を確認してください。
+- **翻訳の費用と時間**:AI_TRANSLATE は問い合わせ1件ごとと、品質チェックの対象(返信案・参照情報)ごとに呼び出します。
 - **choice の確信度**:`confidence` は「最大確率を一様分布で0、1つに集中で1になるよう換算した値」です。ヘルプ記事は19択なので、`auto_conf_min = 0.8` は最大確率がおよそ0.81以上に相当します。必要に応じて調整してください。
 - **score の値**:`score` は段階の番号ではなく期待値(0〜2の小数)で返ります。`quality_min = 1.2` はこの期待値に対する閾値です。
 - **戻り値の取り出し方**:ANSWER_JSON の取り出し方は、`decider-ai` 1.6.0 のソース(`systemone.py`)で確認した形式です。サービス関数の戻り値から `out:ANSWER_JSON` を取り出す方法は、公式サンプルの SQL に合わせています。初回は `CLASSIFY_RESULTS.RAW` を見てください。

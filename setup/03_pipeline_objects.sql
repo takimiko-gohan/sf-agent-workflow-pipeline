@@ -25,6 +25,7 @@ INSERT INTO PIPELINE_CONFIG VALUES
   ('resolves_min',             0.50, '質問に答えている確率がこれ以上なら送信可'),
   ('risk_max',                 0.50, '承認が必要な内容を含む確率がこれ未満なら送信可'),
   ('use_decider_for_quality',  1,    '1=品質チェックに decider-2b を使う(失敗時は自動で汎用LLM)/0=汎用LLMのみ'),
+  ('translate_for_decider',    1,    '1=decider-2b に渡す前に AI_TRANSLATE で英訳する / 0=日本語のまま渡す(翻訳の効果を比べる用)'),
   ('force_classify_failure',   0,    '1 にすると decider-2b での分類(T10)を強制失敗させる(フォールバック検証用)'),
   ('force_agent_failure',      0,    '1 にするとエージェント(T30)を強制失敗させる');
 
@@ -54,9 +55,23 @@ CREATE OR REPLACE TABLE CURRENT_BATCH (TICKET_ID VARCHAR, RECEIVED_DATE DATE) CO
 -- =====================================================================
 -- 3. 各ステップの出力
 -- =====================================================================
+CREATE OR REPLACE TABLE TICKET_TRANSLATIONS (
+  TICKET_ID     VARCHAR,
+  TEXT_EN       VARCHAR,       -- 問い合わせの英訳(失敗時は NULL)
+  ERROR_MESSAGE VARCHAR,
+  TRANSLATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+) COMMENT = 'T07: 問い合わせの英訳(decider-2b への入力用)';
+
+CREATE OR REPLACE TABLE KB_TRANSLATIONS (
+  KB_ID         VARCHAR,
+  TITLE_EN      VARCHAR,       -- ヘルプ記事タイトルの英訳(decider-2b の選択肢に使う)
+  TRANSLATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+) COMMENT = 'T07: ヘルプ記事タイトルの英訳(未翻訳の記事だけ翻訳して蓄積する)';
+
 CREATE OR REPLACE TABLE CLASSIFY_RESULTS (
   TICKET_ID         VARCHAR,
   CLASSIFY_MODEL    VARCHAR,
+  INPUT_LANG        VARCHAR,     -- decider-2b に渡した本文の言語(en = 英訳 / ja = 日本語のまま)
   CATEGORY          VARCHAR,
   CATEGORY_CONF     FLOAT,
   KB_ID             VARCHAR,     -- 'none' = 該当記事なし
@@ -196,8 +211,10 @@ SELECT
   r.CATEGORY, r.KB_ID, r.ROUTE,
   f.FINAL_ROUTE, f.HUMAN_REASON, f.QUALITY_SCORE, f.RESOLVES_PROB, f.RISK_PROB,
   f.FINAL_REPLY, f.DRAFT_REPLY,
-  q.HANDOFF_NOTE
+  q.HANDOFF_NOTE,
+  tr.TEXT_EN
 FROM SUPPORT_TICKETS t
+LEFT JOIN TICKET_TRANSLATIONS tr ON tr.TICKET_ID = t.TICKET_ID
 LEFT JOIN ROUTED_TICKETS r     ON r.TICKET_ID = t.TICKET_ID
 LEFT JOIN FINAL_RESULTS f      ON f.TICKET_ID = t.TICKET_ID
 LEFT JOIN HUMAN_REVIEW_QUEUE q ON q.TICKET_ID = t.TICKET_ID;

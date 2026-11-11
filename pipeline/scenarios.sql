@@ -19,7 +19,7 @@ SELECT SYSTEM$GET_SERVICE_STATUS('DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC');
 CALL SP_SET_SCENARIO('reset');
 
 -- 1. 通常: 1日分を処理
---    期待: T00(HAS_TICKETS) → T10 → T20 → T30 → T40 → T50 → T99
+--    期待: T00(HAS_TICKETS) → T07(英訳) → T10 → T20 → T30 → T40 → T50 → T99
 --          T05 / T11 / T31 / T35 は SKIPPED
 --    ※ agent 行が上限(既定5件)を超えた日は AGENT_OVERFLOW になり、T31 も動く
 CALL SP_SET_SCENARIO('normal');
@@ -47,7 +47,16 @@ CALL SP_SET_SCENARIO('overflow');
 CALL SP_SET_SCENARIO('drained');
 -- → グラフを Run
 
--- 6. 一括処理: グラフの Config (JSON) を {"batch_mode": "all"} にして Deploy し直すと、
+-- 6. 翻訳の効果を比べる: 英訳せずに日本語のまま decider-2b に渡す
+--    手順: reset → translate_for_decider = 0 で数日分 Run → reset → = 1 で同じ日を Run し、
+--          inspect.sql の 15(INPUT_LANG 別の正解率・確率の較正)を比べる
+--    ※ reset で結果が消えるので、比較したい指標は reset 前に控えておく
+--      (RUN_SUMMARY は消えるが、CLASSIFY_RESULTS を別テーブルに CTAS で退避しておくと比べやすい)
+-- UPDATE PIPELINE_CONFIG SET VALUE = 0 WHERE KEY = 'translate_for_decider';   -- 日本語のまま
+-- UPDATE PIPELINE_CONFIG SET VALUE = 1 WHERE KEY = 'translate_for_decider';   -- 英訳する(既定)
+-- CREATE OR REPLACE TABLE CLASSIFY_RESULTS_JA AS SELECT * FROM CLASSIFY_RESULTS;  -- 退避の例
+
+-- 7. 一括処理: グラフの Config (JSON) を {"batch_mode": "all"} にして Deploy し直すと、
 --    未処理の日をまとめて1回で処理する(overflow 経路になりやすい)
 CALL SP_SET_SCENARIO('reset');
 -- → Config を変更して Deploy → Run
@@ -58,6 +67,7 @@ CALL SP_SET_SCENARIO('reset');
 --   戻り値は設定されない(タスク外では無視される)ので、RETURN の文字列を見て手で分岐する
 -- ---------------------------------------------------------------------
 -- CALL SP_PICK_BATCH();
+-- CALL SP_TRANSLATE();
 -- CALL SP_CLASSIFY('decider');         -- 失敗したら CALL SP_CLASSIFY('llm');
 -- CALL SP_ROUTE();
 -- CALL SP_RUN_AGENT_BATCH();           -- ROUTE が ALL_AUTO なら不要

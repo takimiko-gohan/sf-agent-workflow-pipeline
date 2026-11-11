@@ -151,3 +151,33 @@ SELECT
   COUNT_IF(RAW:answer:error IS NOT NULL)                                  AS row_errors
 FROM CLASSIFY_RESULTS
 WHERE CLASSIFY_MODEL = 'decider-2b';
+
+-- =====================================================================
+-- 翻訳(T07)
+-- =====================================================================
+
+-- 15. decider-2b に渡した言語別の精度(英訳 en / 日本語のまま ja)
+--     translate_for_decider を切り替えて実行した結果や、退避した CLASSIFY_RESULTS_JA と比べる
+SELECT
+  c.CLASSIFY_MODEL,
+  c.INPUT_LANG,
+  COUNT(*)                                                                         AS n,
+  ROUND(AVG(IFF(c.CATEGORY = l.TRUE_CATEGORY, 1, 0)), 3)                           AS category_acc,
+  ROUND(AVG(IFF(l.TRUE_RESOLUTION IN ('kb', 'lookup'), IFF(c.KB_ID = l.TRUE_KB_ID, 1, 0), NULL)), 3) AS kb_acc,
+  ROUND(AVG(IFF(l.TRUE_RESOLUTION = 'human', c.HUMAN_PROB, NULL)), 3)              AS avg_human_prob_on_human,     -- 高いほど良い
+  ROUND(AVG(IFF(l.TRUE_RESOLUTION <> 'human', c.HUMAN_PROB, NULL)), 3)             AS avg_human_prob_on_non_human  -- 低いほど良い
+FROM CLASSIFY_RESULTS c
+JOIN TICKET_LABELS l USING (TICKET_ID)
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- 16. 翻訳の状況(失敗行と、訳文のサンプル)
+SELECT COUNT(*) AS n, COUNT_IF(TEXT_EN IS NULL) AS failed FROM TICKET_TRANSLATIONS;
+SELECT t.TICKET_ID, t.SUBJECT, tr.TEXT_EN, tr.ERROR_MESSAGE
+FROM TICKET_TRANSLATIONS tr
+JOIN SUPPORT_TICKETS t USING (TICKET_ID)
+ORDER BY t.TICKET_ID
+LIMIT 10;
+SELECT k.KB_ID, k.TITLE, x.TITLE_EN
+FROM KB_ARTICLES k LEFT JOIN KB_TRANSLATIONS x USING (KB_ID)
+ORDER BY k.KB_ID;

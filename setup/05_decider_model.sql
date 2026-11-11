@@ -88,9 +88,13 @@ SHOW SERVICES LIKE 'DECIDER_2B_SVC';
 SELECT SYSTEM$GET_SERVICE_STATUS('DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC');   -- READY になるまで待つ
 
 -- 1件で応答を確認する(STATE_JSON は JSON 文字列、QUESTIONS_JSON は質問の JSON)
-WITH r AS (
-  SELECT DECIDER_2B_SVC!SYSTEM_ONE(
-           TO_JSON(TO_VARIANT('ログインしようとしたところ、パスワードを忘れてしまいました。再設定の方法を教えてください。')),
+-- パイプラインと同じく、日本語の問い合わせを AI_TRANSLATE で英訳してから渡す
+WITH src AS (
+  SELECT AI_TRANSLATE('ログインしようとしたところ、パスワードを忘れてしまいました。再設定の方法を教えてください。', 'ja', 'en') AS text_en
+),
+r AS (
+  SELECT text_en, DECIDER_2B_SVC!SYSTEM_ONE(
+           TO_JSON(TO_VARIANT(text_en)),
            TO_JSON({
              'category': {
                'type': 'choice',
@@ -108,8 +112,10 @@ WITH r AS (
              }
            })
          ) AS out
+  FROM src
 )
 SELECT
+  text_en,
   TRY_PARSE_JSON(out:ANSWER_JSON::STRING)                         AS answer,         -- answers.category.choice / probabilities など
   out:ELAPSED_MS::FLOAT                                           AS elapsed_ms,
   out:INPUT_TOKENS::INT                                           AS input_tokens,

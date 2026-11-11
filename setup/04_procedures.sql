@@ -94,6 +94,67 @@ END;
 $$;
 
 -- =====================================================================
+-- T07: 英訳(AI_TRANSLATE)
+--   decider-2b は英語で学習されたモデルのため、渡す前に問い合わせを英訳する
+--   (1) ヘルプ記事タイトルのうち未翻訳のものを英訳して KB_TRANSLATIONS に蓄積(decider-2b の選択肢に使う)
+--   (2) 今回のバッチの問い合わせを英訳して TICKET_TRANSLATIONS に保存
+--   失敗した行は TEXT_EN が NULL になり、T10 はその行だけ日本語のまま渡す。
+--   翻訳全体が失敗してもタスクは成功扱いにして、後続(T10)を止めない
+--   translate_for_decider = 0 のときは何もしない(日本語のまま渡した場合と比べる用)
+-- =====================================================================
+CREATE OR REPLACE PROCEDURE SP_TRANSLATE()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+$$
+DECLARE
+  use_tr FLOAT;
+  n_kb   NUMBER DEFAULT 0;
+  n_ok   NUMBER DEFAULT 0;
+  n_err  NUMBER DEFAULT 0;
+  msg    VARCHAR;
+BEGIN
+  SELECT COALESCE(CFG('translate_for_decider'), 1) INTO :use_tr;
+  IF (use_tr < 1) THEN
+    msg := 'skipped (translate_for_decider = 0)';
+    CALL SP_LOG_EVENT('T07_TRANSLATE', 'skipped', :msg);
+    RETURN msg;
+  END IF;
+
+  -- (1) ヘルプ記事タイトル(未翻訳・翻訳失敗のものだけ)
+  DELETE FROM KB_TRANSLATIONS WHERE TITLE_EN IS NULL;
+  INSERT INTO KB_TRANSLATIONS (KB_ID, TITLE_EN)
+  SELECT k.KB_ID, AI_TRANSLATE(k.TITLE, 'ja', 'en')
+  FROM KB_ARTICLES k
+  WHERE NOT EXISTS (SELECT 1 FROM KB_TRANSLATIONS x WHERE x.KB_ID = k.KB_ID);
+  n_kb := SQLROWCOUNT;
+
+  -- (2) 問い合わせ(エラー詳細も残す)
+  DELETE FROM TICKET_TRANSLATIONS WHERE TICKET_ID IN (SELECT TICKET_ID FROM CURRENT_BATCH);
+  INSERT INTO TICKET_TRANSLATIONS (TICKET_ID, TEXT_EN, ERROR_MESSAGE)
+  SELECT TICKET_ID, r:value::STRING, r:error::STRING
+  FROM (
+    SELECT t.TICKET_ID, AI_TRANSLATE(t.TICKET_TEXT, 'ja', 'en', TRUE) AS r
+    FROM SUPPORT_TICKETS t
+    JOIN CURRENT_BATCH b ON b.TICKET_ID = t.TICKET_ID
+  ) x;
+
+  SELECT COUNT_IF(tr.TEXT_EN IS NOT NULL), COUNT_IF(tr.TEXT_EN IS NULL) INTO :n_ok, :n_err
+  FROM TICKET_TRANSLATIONS tr JOIN CURRENT_BATCH b ON b.TICKET_ID = tr.TICKET_ID;
+
+  msg := 'tickets ok=' || n_ok || ' error=' || n_err || ' kb_titles_translated=' || n_kb;
+  CALL SP_LOG_EVENT('T07_TRANSLATE', 'translated', :msg);
+  RETURN msg;
+EXCEPTION
+  WHEN OTHER THEN
+    msg := 'failed: ' || SQLERRM;
+    CALL SP_LOG_EVENT('T07_TRANSLATE', 'failed', :msg);
+    RETURN msg;
+END;
+$$;
+
+-- =====================================================================
 -- T10 / T11: 問い合わせの分類
 --   METHOD = 'decider' : decider-2b(Model Registry → SPCS サービス DECIDER_2B_SVC)(T10)
 --   METHOD = 'llm'     : 汎用LLM + 構造化出力(T11 フォールバック)
@@ -102,7 +163,8 @@ $$;
 --     kb_article         : 回答に使えるヘルプ記事(choice。記事一覧から動的に組み立てる)
 --     requires_human     : 担当者の判断・権限・調査が必要か(noul = 真の確率)
 --     needs_account_data : 顧客固有のデータ確認が必要か(noul)
---   decider-2b は英語で学習されているため、質問文と選択肢は英語にしている(問い合わせ本文は日本語のまま)
+--   decider-2b は英語で学習されているため、質問文は英語、問い合わせ本文と記事タイトルは T07 の英訳を渡す
+--   (translate_for_decider = 0 または翻訳失敗の行は日本語のまま渡し、INPUT_LANG = 'ja' を記録する)
 -- =====================================================================
 CREATE OR REPLACE PROCEDURE SP_CLASSIFY(METHOD VARCHAR)
 RETURNS VARCHAR
@@ -115,10 +177,12 @@ DECLARE
   all_unparsed   EXCEPTION (-20002, '分類結果を1件も解析できなかった');
   bad_method     EXCEPTION (-20009, 'METHOD は decider か llm を指定する');
   force_flag FLOAT;
+  use_tr     FLOAT;
   n_total    NUMBER DEFAULT 0;
   n_null     NUMBER DEFAULT 0;
 BEGIN
-  SELECT COALESCE(CFG('force_classify_failure'), 0) INTO :force_flag;
+  SELECT COALESCE(CFG('force_classify_failure'), 0), COALESCE(CFG('translate_for_decider'), 1)
+    INTO :force_flag, :use_tr;
   IF (METHOD = 'decider' AND force_flag >= 1) THEN
     RAISE forced_failure;
   END IF;
@@ -127,10 +191,14 @@ BEGIN
 
   IF (METHOD = 'decider') THEN
     INSERT INTO CLASSIFY_RESULTS
-      (TICKET_ID, CLASSIFY_MODEL, CATEGORY, CATEGORY_CONF, KB_ID, KB_CONF, HUMAN_PROB, ACCOUNT_DATA_PROB, RAW)
+      (TICKET_ID, CLASSIFY_MODEL, INPUT_LANG, CATEGORY, CATEGORY_CONF, KB_ID, KB_CONF, HUMAN_PROB, ACCOUNT_DATA_PROB, RAW)
     WITH kb AS (
-      SELECT OBJECT_INSERT(OBJECT_AGG(KB_ID, TO_VARIANT(TITLE_EN)), 'none', 'None of these articles answers the ticket') AS criteria
-      FROM KB_ARTICLES
+      -- 選択肢: 記事タイトルの英訳(未翻訳・翻訳オフのときは日本語タイトル)
+      SELECT OBJECT_INSERT(
+               OBJECT_AGG(k.KB_ID, TO_VARIANT(IFF(:use_tr >= 1, COALESCE(x.TITLE_EN, k.TITLE), k.TITLE))),
+               'none', 'None of these articles answers the ticket') AS criteria
+      FROM KB_ARTICLES k
+      LEFT JOIN KB_TRANSLATIONS x ON x.KB_ID = k.KB_ID
     ),
     q AS (
       SELECT TO_JSON({
@@ -171,21 +239,29 @@ BEGIN
       }) AS questions_json
       FROM kb
     ),
-    d AS (
+    src AS (
       SELECT
         t.TICKET_ID,
+        IFF(:use_tr >= 1 AND tr.TEXT_EN IS NOT NULL, tr.TEXT_EN, t.TICKET_TEXT) AS STATE_TEXT,
+        IFF(:use_tr >= 1 AND tr.TEXT_EN IS NOT NULL, 'en', 'ja')               AS INPUT_LANG
+      FROM SUPPORT_TICKETS t
+      JOIN CURRENT_BATCH b            ON b.TICKET_ID = t.TICKET_ID
+      LEFT JOIN TICKET_TRANSLATIONS tr ON tr.TICKET_ID = t.TICKET_ID
+    ),
+    d AS (
+      SELECT
+        s.TICKET_ID, s.INPUT_LANG,
         DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC!SYSTEM_ONE(
-          TO_JSON(TO_VARIANT(t.TICKET_TEXT)),   -- STATE_JSON: 問い合わせ本文(JSON文字列)
+          TO_JSON(TO_VARIANT(s.STATE_TEXT)),    -- STATE_JSON: 問い合わせ本文(JSON文字列)
           q.questions_json                      -- QUESTIONS_JSON
         ) AS out
-      FROM SUPPORT_TICKETS t
-      JOIN CURRENT_BATCH b ON b.TICKET_ID = t.TICKET_ID
+      FROM src s
       CROSS JOIN q
     ),
     p AS (
-      SELECT TICKET_ID, out, TRY_PARSE_JSON(out:ANSWER_JSON::STRING) AS j FROM d
+      SELECT TICKET_ID, INPUT_LANG, out, TRY_PARSE_JSON(out:ANSWER_JSON::STRING) AS j FROM d
     )
-    SELECT TICKET_ID, 'decider-2b',
+    SELECT TICKET_ID, 'decider-2b', INPUT_LANG,
            j:answers:category:choice::STRING,
            j:answers:category:confidence::FLOAT,
            j:answers:kb_article:choice::STRING,
@@ -201,7 +277,7 @@ BEGIN
 
   ELSEIF (METHOD = 'llm') THEN
     INSERT INTO CLASSIFY_RESULTS
-      (TICKET_ID, CLASSIFY_MODEL, CATEGORY, CATEGORY_CONF, KB_ID, KB_CONF, HUMAN_PROB, ACCOUNT_DATA_PROB, RAW)
+      (TICKET_ID, CLASSIFY_MODEL, INPUT_LANG, CATEGORY, CATEGORY_CONF, KB_ID, KB_CONF, HUMAN_PROB, ACCOUNT_DATA_PROB, RAW)
     WITH kbl AS (
       SELECT LISTAGG(KB_ID || ': ' || TITLE, '\n') WITHIN GROUP (ORDER BY KB_ID) AS kb_list FROM KB_ARTICLES
     ),
@@ -246,7 +322,7 @@ BEGIN
     n AS (
       SELECT TICKET_ID, COALESCE(j0:structured_output[0]:raw_message, j0) AS j, j0 FROM d
     )
-    SELECT TICKET_ID, 'llm-fallback',
+    SELECT TICKET_ID, 'llm-fallback', 'ja',
            j:category::STRING, j:category_confidence::FLOAT,
            j:kb_id::STRING, j:kb_confidence::FLOAT,
            j:requires_human_prob::FLOAT, j:needs_account_data_prob::FLOAT,
@@ -521,7 +597,7 @@ $$;
 -- =====================================================================
 -- T40: 回答の確定
 --   (1) auto の行に、選ばれたヘルプ記事だけを根拠にした定型回答を生成する
---   (2) auto とエージェントの回答案を品質チェックする
+--   (2) auto とエージェントの回答案を品質チェックする(decider-2b には英訳して渡す)
 --       grounded(根拠スコア 0〜2) / resolves(質問に答えているか) / risky(承認が必要な内容を含むか)
 --       decider-2b を試し、失敗・解析不能なら汎用LLMに切り替える
 --   (3) 基準を満たすものは送信可、満たさないものは下書き付きで human にする
@@ -535,6 +611,7 @@ AS
 $$
 DECLARE
   use_dec  FLOAT;
+  use_tr   FLOAT;
   qmin     FLOAT;
   rmin     FLOAT;
   riskmax  FLOAT;
@@ -547,9 +624,9 @@ DECLARE
   n_send   NUMBER DEFAULT 0;
   rv       VARCHAR;
 BEGIN
-  SELECT COALESCE(CFG('use_decider_for_quality'), 1), CFG('quality_min'), CFG('resolves_min'),
-         CFG('risk_max'), CFG('agent_max_rows')
-    INTO :use_dec, :qmin, :rmin, :riskmax, :maxr;
+  SELECT COALESCE(CFG('use_decider_for_quality'), 1), COALESCE(CFG('translate_for_decider'), 1),
+         CFG('quality_min'), CFG('resolves_min'), CFG('risk_max'), CFG('agent_max_rows')
+    INTO :use_dec, :use_tr, :qmin, :rmin, :riskmax, :maxr;
 
   -- (1) 定型回答の生成
   DELETE FROM AUTO_ANSWERS WHERE TICKET_ID IN (SELECT TICKET_ID FROM CURRENT_BATCH);
@@ -608,6 +685,21 @@ BEGIN
 
   IF (use_dec >= 1) THEN
     BEGIN
+      -- decider-2b に渡すため、問い合わせ・返信案・参照情報を英訳する(翻訳オフ・失敗時は日本語のまま)
+      IF (use_tr >= 1) THEN
+        CREATE OR REPLACE TEMPORARY TABLE TMP_CANDIDATES_DEC AS
+        SELECT c.TICKET_ID,
+               COALESCE(tr.TEXT_EN, c.TICKET_TEXT)                   AS TICKET_IN,
+               COALESCE(AI_TRANSLATE(c.REPLY_TEXT, 'ja', 'en'), c.REPLY_TEXT) AS REPLY_IN,
+               COALESCE(AI_TRANSLATE(c.REFERENCE,  'ja', 'en'), c.REFERENCE)  AS REFERENCE_IN
+        FROM TMP_CANDIDATES c
+        LEFT JOIN TICKET_TRANSLATIONS tr ON tr.TICKET_ID = c.TICKET_ID;
+      ELSE
+        CREATE OR REPLACE TEMPORARY TABLE TMP_CANDIDATES_DEC AS
+        SELECT TICKET_ID, TICKET_TEXT AS TICKET_IN, REPLY_TEXT AS REPLY_IN, REFERENCE AS REFERENCE_IN
+        FROM TMP_CANDIDATES;
+      END IF;
+
       INSERT INTO TMP_QUALITY
       SELECT TICKET_ID,
              qj:answers:grounded:score::FLOAT,      -- 3段階の期待値(0〜2)
@@ -621,7 +713,7 @@ BEGIN
             c.TICKET_ID,
             DECISION_PIPE_DB.SUPPORT.DECIDER_2B_SVC!SYSTEM_ONE(
                    -- STATE_JSON: 問い合わせ・返信案・参照情報をまとめた JSON オブジェクト
-                   TO_JSON(OBJECT_CONSTRUCT('ticket', c.TICKET_TEXT, 'draft_reply', c.REPLY_TEXT, 'reference', c.REFERENCE)),
+                   TO_JSON(OBJECT_CONSTRUCT('ticket', c.TICKET_IN, 'draft_reply', c.REPLY_IN, 'reference', c.REFERENCE_IN)),
                    TO_JSON({
                      'grounded': {
                        'type': 'score',
@@ -642,7 +734,7 @@ BEGIN
                      }
                    })
                  ) AS out
-          FROM TMP_CANDIDATES c
+          FROM TMP_CANDIDATES_DEC c
         ) sv
       ) qd;
       SELECT COUNT(*), COUNT(SCORE) INTO :n_q, :n_scored FROM TMP_QUALITY;
@@ -859,6 +951,8 @@ BEGIN
     TRUNCATE TABLE BATCH_STATE;
     TRUNCATE TABLE CURRENT_BATCH_DATES;
     TRUNCATE TABLE CURRENT_BATCH;
+    TRUNCATE TABLE TICKET_TRANSLATIONS;
+    TRUNCATE TABLE KB_TRANSLATIONS;
     TRUNCATE TABLE CLASSIFY_RESULTS;
     TRUNCATE TABLE ROUTED_TICKETS;
     TRUNCATE TABLE AGENT_RESULTS;

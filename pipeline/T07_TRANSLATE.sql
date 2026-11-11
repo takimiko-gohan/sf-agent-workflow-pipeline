@@ -1,0 +1,12 @@
+-- =====================================================================
+-- T07_TRANSLATE  [通常]
+-- decider-2b(英語モデル)に渡すため、問い合わせとヘルプ記事タイトルを AI_TRANSLATE で英訳する。
+-- 翻訳に失敗した行は日本語のまま後続に渡し、タスク自体は失敗させない。
+-- translate_for_decider = 0 のときは何もしない(日本語のまま渡した場合と比べる用)
+--
+-- Pipeline Builder の設定(Task タブ > Dependencies)
+--   Predecessors          : T00_PICK_BATCH
+--   Predecessors condition: All succeeded(既定)
+--   Additional conditions : SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T00_PICK_BATCH') = 'HAS_TICKETS'
+-- =====================================================================
+CALL DECISION_PIPE_DB.SUPPORT.SP_TRANSLATE();
