@@ -1,6 +1,7 @@
 -- =====================================================================
 -- 03_pipeline_objects.sql
 -- パイプラインの設定値と、各カードが読み書きするテーブル・確認用ビュー
+-- (処理ロジックはすべて pipeline/ のカード側に書いている。プロシージャは使わない)
 -- =====================================================================
 
 USE ROLE DECISION_PIPE_ROLE;
@@ -24,10 +25,10 @@ INSERT INTO PIPELINE_CONFIG VALUES
   ('quality_min',              1.20, '回答の根拠スコア(0〜2)がこれ以上なら送信可'),
   ('resolves_min',             0.50, '質問に答えている確率がこれ以上なら送信可'),
   ('risk_max',                 0.50, '承認が必要な内容を含む確率がこれ未満なら送信可'),
-  ('use_decider_for_quality',  1,    '1=品質チェックに decider-2b を使う(失敗時は自動で汎用LLM)/0=汎用LLMのみ'),
   ('translate_for_decider',    1,    '1=decider-2b に渡す前に AI_TRANSLATE で英訳する / 0=日本語のまま渡す(翻訳の効果を比べる用)'),
   ('force_classify_failure',   0,    '1 にすると decider-2b での分類(T10)を強制失敗させる(フォールバック検証用)'),
-  ('force_agent_failure',      0,    '1 にするとエージェント(T30)を強制失敗させる');
+  ('force_agent_failure',      0,    '1 にするとエージェント(T30)を強制失敗させる'),
+  ('force_quality_failure',    0,    '1 にすると decider-2b での品質チェック(T41)を強制失敗させる');
 
 CREATE OR REPLACE FUNCTION CFG(K VARCHAR)
 RETURNS FLOAT
@@ -117,6 +118,26 @@ CREATE OR REPLACE TABLE AUTO_ANSWERS (
   MODEL      VARCHAR,
   CREATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
 ) COMMENT = 'T40: ヘルプ記事にもとづく定型回答';
+
+CREATE OR REPLACE TABLE QUALITY_CANDIDATES (
+  TICKET_ID   VARCHAR,
+  SRC         VARCHAR,           -- auto / agent
+  TICKET_TEXT VARCHAR,
+  REPLY_TEXT  VARCHAR,
+  REFERENCE   VARCHAR,           -- 照合に使う参照情報(ヘルプ記事・顧客データの要約)
+  CREATED_AT  TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+) COMMENT = 'T40: 品質チェックの対象(送信候補)';
+
+CREATE OR REPLACE TABLE QUALITY_SCORES (
+  TICKET_ID  VARCHAR,
+  MODEL      VARCHAR,            -- decider-2b / llm-fallback
+  INPUT_LANG VARCHAR,            -- decider-2b に渡した言語(en / ja)
+  SCORE      FLOAT,              -- 根拠スコア(0〜2)
+  RESOLVES   FLOAT,              -- 質問に答えている確率
+  RISK       FLOAT,              -- 承認が必要な内容を含む確率
+  RAW        VARIANT,
+  SCORED_AT  TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+) COMMENT = 'T41/T42: 品質チェックの結果';
 
 CREATE OR REPLACE TABLE FINAL_RESULTS (
   TICKET_ID      VARCHAR,
