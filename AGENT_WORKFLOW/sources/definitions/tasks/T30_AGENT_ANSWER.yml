@@ -1,0 +1,19 @@
+definitions:
+  - resource: task
+    name: DECISION_PIPE_DB.SUPPORT.T30_AGENT_ANSWER
+    warehouse: DECISION_PIPE_WH
+    predecessors:
+      - DECISION_PIPE_DB.SUPPORT.T20_ROUTE
+    definition:
+      type: code_bundle
+      name: DECISION_PIPE_DB.SUPPORT.T30_CB
+      entrypoint: T30_AGENT_ANSWER.py
+      specification:
+        bundle:
+          type: custom
+          compute_type: compute_pool
+          compute_options:
+            runtime_version: V3-CPU-PY3.12
+            compute_pool: SYSTEM_COMPUTE_POOL_CPU
+            query_warehouse: DECISION_PIPE_WH
+          language: python

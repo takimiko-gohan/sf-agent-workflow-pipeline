@@ -1,0 +1,78 @@
+definitions:
+  - resource: task
+    name: DECISION_PIPE_DB.SUPPORT.T41_QUALITY_CHECK
+    warehouse: DECISION_PIPE_WH
+    predecessors:
+      - DECISION_PIPE_DB.SUPPORT.T40_AUTO_ANSWER
+    comment: デシジョンモデルによる品質チェック
+    definition:
+      type: sql
+      value: |
+        BEGIN
+        -- =====================================================================
+        -- T41_QUALITY_CHECK
+        -- 送信候補を snowflake-decision(AI_COMPLETE)で品質チェックする。
+        -- 問い合わせ・返信案・参照情報を日本語のまま JSON オブジェクトにまとめて STATE として渡す。
+        --   grounded : score(3段階の期待値 0〜2)— 参照情報で裏付けられているか
+        --   resolves : noul — 質問に直接答えているか
+        --   risky    : noul — 返金・期日の約束など、担当者の承認が必要な内容を含むか
+        -- AI_COMPLETE のエラー・シナリオの強制失敗・全件解析不能ならタスクが失敗し、T42 が汎用LLMで採点し直す。
+        --
+        -- Pipeline Builder の設定
+        --   種類                  : SQL
+        --   Predecessors          : T40_AUTO_ANSWER
+        --   Condition(WHEN)      : SYSTEM$PREDECESSORS_STATE('ALL_SUCCEEDED')(既定)
+        -- =====================================================================
+        USE SCHEMA DECISION_PIPE_DB.SUPPORT;
+
+        -- シナリオ quality_down: 強制失敗
+        SELECT TO_NUMBER(IFF(CFG('force_quality_failure') >= 1,
+                             '強制失敗: シナリオ quality_down(snowflake-decision 停止の想定)', '0'));
+
+        DELETE FROM QUALITY_SCORES WHERE TICKET_ID IN (SELECT TICKET_ID FROM CURRENT_BATCH);
+
+        INSERT INTO QUALITY_SCORES (TICKET_ID, MODEL, INPUT_LANG, SCORE, RESOLVES, RISK, RAW)
+        WITH p AS (
+          SELECT
+            q.TICKET_ID,
+            AI_COMPLETE(
+              model  => 'snowflake-decision',
+              prompt => TO_JSON(OBJECT_CONSTRUCT(
+                'state', OBJECT_CONSTRUCT('ticket', q.TICKET_TEXT, 'draft_reply', q.REPLY_TEXT, 'reference', q.REFERENCE),
+                'questions', {
+                  'grounded': {
+                    'type': 'score',
+                    'instructions': 'Is everything in draft_reply supported by reference?',
+                    'criteria': ['Not supported, or contradicts the reference', 'Partly supported', 'Fully supported by the reference']
+                  },
+                  'resolves': {
+                    'type': 'noul',
+                    'instructions': 'Does draft_reply directly answer the question in ticket?',
+                    'criteria': {'true': 'It answers the question', 'false': 'It does not answer the question'}
+                  },
+                  'risky': {
+                    'type': 'noul',
+                    'instructions': 'Does draft_reply contain anything that needs a human agent''s approval, such as promising refunds, '
+                                 || 'discounts or dates, stating product behavior that is not in reference, '
+                                 || 'or revealing information about other customers?',
+                    'criteria': {'true': 'It needs approval', 'false': 'It is safe to send'}
+                  }
+                }))
+            ) AS qj
+          FROM QUALITY_CANDIDATES q
+          JOIN CURRENT_BATCH b ON b.TICKET_ID = q.TICKET_ID
+        )
+        SELECT
+          TICKET_ID, 'snowflake-decision', 'ja',
+          qj:answers:grounded:score::FLOAT,
+          qj:answers:resolves:noul::FLOAT,
+          qj:answers:risky:noul::FLOAT,
+          OBJECT_CONSTRUCT_KEEP_NULL('answer', qj)
+        FROM p;
+
+        -- 1件も採点できなかった場合は失敗させて T42 に回す
+        SELECT TO_NUMBER(IFF(COUNT(*) > 0 AND COUNT(s.SCORE) = 0,
+                             '品質チェックの結果を1件も解析できなかった(QUALITY_SCORES.RAW を確認)', '0'))
+        FROM QUALITY_SCORES s
+        JOIN CURRENT_BATCH b ON b.TICKET_ID = s.TICKET_ID;
+        END;
