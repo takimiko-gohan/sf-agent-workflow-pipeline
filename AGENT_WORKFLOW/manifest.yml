@@ -1,0 +1,13 @@
+manifest_version: 2
+type: DCM_PROJECT
+default_target: "DEV"
+
+targets:
+  DEV:
+    account_identifier: <your account identifier>
+    project_name: "DECISION_PIPE_DB.SUPPORT.TEST_WORKFLOW"
+    project_owner: DECISION_PIPE_ROLE
+
+assets:
+  t30_agent_answer:
+    path: bundles/t30/**/*

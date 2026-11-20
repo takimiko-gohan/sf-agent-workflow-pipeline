@@ -66,7 +66,8 @@ def parse_answer(resp: str):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--schema", default="DECISION_PIPE_DB.SUPPORT")
-    args = parser.parse_args()
+    # 実行環境(ノートブックカーネル)が渡す -f などの引数は無視する
+    args, _ = parser.parse_known_args()
 
     session = get_active_session()
     session.sql(f"USE SCHEMA {args.schema}").collect()

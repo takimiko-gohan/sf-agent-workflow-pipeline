@@ -1,8 +1,7 @@
 -- =====================================================================
 -- 00_setup.sql
--- 検証用のロール・ウェアハウス・DB と、SaaSサポート版のスキーマを作成する
+-- 検証用のロール・ウェアハウス・DBとスキーマを作成する
 -- 実行ロール: ACCOUNTADMIN(またはロール/WH/DB作成権限を持つロール)
--- 需要予測版(archive_demand_forecast)を実行済みでもそのまま流せる(冪等)
 -- =====================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -43,8 +42,7 @@ GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE IDENTIFIER($pipe_role);
 -- スキーマ所有者は CREATE TASK / AGENT / SEMANTIC VIEW / CORTEX SEARCH SERVICE /
 -- PROCEDURE / DCM PROJECT をすべて持つため、個別付与は不要
 USE ROLE IDENTIFIER($pipe_role);
-CREATE SCHEMA IF NOT EXISTS DECISION_PIPE_DB.SUPPORT
-  COMMENT = 'SaaSカスタマーサポート版';
+CREATE SCHEMA IF NOT EXISTS DECISION_PIPE_DB.SUPPORT;
 
 USE WAREHOUSE IDENTIFIER($pipe_wh);
 USE SCHEMA DECISION_PIPE_DB.SUPPORT;

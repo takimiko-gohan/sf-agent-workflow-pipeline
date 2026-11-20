@@ -1,0 +1,13 @@
+definitions:
+  - resource: task_graph_object
+    name: DECISION_PIPE_DB.SUPPORT.SUPPORT_PROCESSING
+    roots:
+      - DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH
+    finalizer: DECISION_PIPE_DB.SUPPORT.T99_RUNSUMMARY
+    task_defaults:
+      warehouse: DECISION_PIPE_WH
+  - resource: code_bundle
+    name: DECISION_PIPE_DB.SUPPORT.T30_CB
+    from:
+      type: asset
+      asset: t30_agent_answer
