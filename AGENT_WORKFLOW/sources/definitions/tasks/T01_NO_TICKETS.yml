@@ -11,7 +11,7 @@ definitions:
       value: >
         -- =====================================================================
 
-        -- T05_NO_TICKETS
+        -- T01_NO_TICKETS
 
         -- チケットがない日だけ動く(戻り値による分岐)。空振りをイベントログに残す。
 
@@ -32,4 +32,4 @@ definitions:
         TASK, EVENT, DETAIL)
 
         SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID'),
-        'T05_NO_TICKETS', 'no_tickets', '処理対象のチケットなし';
+        'T01_NO_TICKETS', 'no_tickets', '処理対象のチケットなし';

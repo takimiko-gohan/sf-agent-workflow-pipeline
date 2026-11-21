@@ -10,12 +10,12 @@ ROUTE = 'agent' のチケットを受付順に agent_max_rows 件まで、Cortex
 
 Pipeline Builder の設定
   種類            : Python file(このファイルを Entrypoint に指定)
-  Compute         : Warehouse(DECISION_PIPE_WH)または Compute pool
-  Runtime version : 3.11
+  Compute         : Compute pool(SYSTEM_COMPUTE_POOL_CPU、クエリは DECISION_PIPE_WH)
+  Runtime version : V3-CPU-PY3.12
   Arguments       : なし(必要なら --schema DB.SCHEMA)
   Timeout         : agent_max_rows × 120 秒程度(既定5件なら 600000 ms)
   Predecessors    : T20_ROUTE
-  Condition(WHEN): SYSTEM$GET_PREDECESSOR_RETURN_VALUE('T20_ROUTE') <> 'ALL_AUTO'
+  Condition(WHEN): なし(毎回動く。agent の対象が0件なら何もせず終わる)
 """
 
 import argparse
