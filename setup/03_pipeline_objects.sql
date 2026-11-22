@@ -24,10 +24,10 @@ INSERT INTO PIPELINE_CONFIG VALUES
   ('quality_min',              1.20, '回答の根拠スコア(0〜2)がこれ以上なら送信可'),
   ('resolves_min',             0.50, '質問に答えている確率がこれ以上なら送信可'),
   ('risk_max',                 0.50, '承認が必要な内容を含む確率がこれ未満なら送信可'),
-  ('translate_for_decider',    1,    '1=decider-2b に渡す前に AI_TRANSLATE で英訳する / 0=日本語のまま渡す(翻訳の効果を比べる用)'),
-  ('force_classify_failure',   0,    '1 にすると decider-2b での分類(T10)を強制失敗させる(フォールバック検証用)'),
+  ('translate_for_decider',    1,    '旧構成の設定(英訳してから判定モデルに渡す)。現在はどのタスクも参照しない'),
+  ('force_classify_failure',   0,    '1 にすると snowflake-decision での分類(T10)を強制失敗させる(フォールバック検証用)'),
   ('force_agent_failure',      0,    '1 にするとエージェント(T30)を強制失敗させる'),
-  ('force_quality_failure',    0,    '1 にすると decider-2b での品質チェック(T41)を強制失敗させる');
+  ('force_quality_failure',    0,    '1 にすると snowflake-decision での品質チェック(T41)を強制失敗させる');
 
 CREATE OR REPLACE FUNCTION CFG(K VARCHAR)
 RETURNS FLOAT
@@ -60,18 +60,18 @@ CREATE OR REPLACE TABLE TICKET_TRANSLATIONS (
   TEXT_EN       VARCHAR,       -- 問い合わせの英訳(失敗時は NULL)
   ERROR_MESSAGE VARCHAR,
   TRANSLATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-) COMMENT = 'T07: 問い合わせの英訳(decider-2b への入力用)';
+) COMMENT = '旧構成: 問い合わせの英訳(現在は未使用)';
 
 CREATE OR REPLACE TABLE KB_TRANSLATIONS (
   KB_ID         VARCHAR,
-  TITLE_EN      VARCHAR,       -- ヘルプ記事タイトルの英訳(decider-2b の選択肢に使う)
+  TITLE_EN      VARCHAR,       -- ヘルプ記事タイトルの英訳(旧構成・現在は未使用)
   TRANSLATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
 ) COMMENT = 'T07: ヘルプ記事タイトルの英訳(未翻訳の記事だけ翻訳して蓄積する)';
 
 CREATE OR REPLACE TABLE CLASSIFY_RESULTS (
   TICKET_ID         VARCHAR,
   CLASSIFY_MODEL    VARCHAR,
-  INPUT_LANG        VARCHAR,     -- decider-2b に渡した本文の言語(en = 英訳 / ja = 日本語のまま)
+  INPUT_LANG        VARCHAR,     -- 判定モデルに渡した本文の言語(現在は常に ja)
   CATEGORY          VARCHAR,
   CATEGORY_CONF     FLOAT,
   KB_ID             VARCHAR,     -- 'none' = 該当記事なし
@@ -129,8 +129,8 @@ CREATE OR REPLACE TABLE QUALITY_CANDIDATES (
 
 CREATE OR REPLACE TABLE QUALITY_SCORES (
   TICKET_ID  VARCHAR,
-  MODEL      VARCHAR,            -- decider-2b / llm-fallback
-  INPUT_LANG VARCHAR,            -- decider-2b に渡した言語(en / ja)
+  MODEL      VARCHAR,            -- snowflake-decision / llm-fallback
+  INPUT_LANG VARCHAR,            -- 判定モデルに渡した言語(現在は常に ja)
   SCORE      FLOAT,              -- 根拠スコア(0〜2)
   RESOLVES   FLOAT,              -- 質問に答えている確率
   RISK       FLOAT,              -- 承認が必要な内容を含む確率

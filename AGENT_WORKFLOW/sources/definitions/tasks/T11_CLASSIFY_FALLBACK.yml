@@ -14,9 +14,9 @@ definitions:
 
         -- T11_CLASSIFY_FALLBACK
 
-        -- T10(decider-2b)が失敗したときだけ動き、汎用LLMの構造化出力で分類し直す。
+        -- T10(snowflake-decision)が失敗したときだけ動き、汎用LLMの構造化出力で分類し直す。
 
-        -- confidence や確率は LLM の自己申告値なので、decider-2b の確率ほど当てにならない点に注意。
+        -- confidence や確率は LLM の自己申告値なので、snowflake-decision の確率ほど当てにならない点に注意。
 
         -- モデル名 'claude-sonnet-5' は自アカウントで AI_COMPLETE に使えるものに置き換える。
 

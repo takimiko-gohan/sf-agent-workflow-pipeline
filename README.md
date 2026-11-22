@@ -1,4 +1,4 @@
-# Snowflake Pipeline builderを使った Agent Workflowパイプラインを作成しよう！
+# Snowflake Pipeline Builderを使った Agent Workflowパイプラインを作成しよう！
 
 架空のプロジェクト管理SaaS「TaskFlow」の問い合わせフォームに届いたチケットを分類し、次の3つに振り分けて処理するパイプラインの検証キットです。
 
@@ -12,7 +12,7 @@ auto と agent の回答も品質チェックにかけます。基準を満た�
 
 分類(T10)と品質チェック(T41)には、Snowflake の判定モデル **`snowflake-decision`** を `AI_COMPLETE` から使います。choice / score / noul(真偽)の質問に対して選択肢ごとの確率を返すので、振り分けの閾値を確率で決められます。
 
-> `snowflake-decision` は Private Preview です(2026-10 時点)。本番利用の前に提供状況を確認してください。
+> Pipeline Builder は Private Preview、`snowflake-decision` は Public Preview です(2026-11-20 時点、[リリースノート](https://docs.snowflake.com/en/release-notes/2026/other/2026-11-20-ai-complete-snowflake-decision-public-preview))。利用の前に提供状況を確認してください。
 
 判定モデルが使えないとき(エラーや強制失敗のシナリオ)は、T11 / T42 が汎用LLM(`AI_COMPLETE` の構造化出力)で分類・採点し直します。
 日本企業での利用を想定し、問い合わせ・返信・顧客データ・ヘルプ記事はすべて日本語です。
@@ -21,7 +21,9 @@ auto と agent の回答も品質チェックにかけます。基準を満た�
 
 ## 全体像
 
-パイプラインは DCM プロジェクト `TEST_WORKFLOW` の Pipeline Builder 定義(タスクグラフ `T00_PICK_BATCH_GRAPH`)です。
+パイプラインは DCM プロジェクト `TEST_WORKFLOW`(フォルダは `AGENT_WORKFLOW/`)の Pipeline Builder 定義(タスクグラフ `SUPPORT_PROCESSING`)です。
+
+問い合わせ1件ごとの auto / agent / human は、T20 が `ROUTED_TICKETS.ROUTE` 列に書き込みます。各タスクはバッチ全体を処理し、その中で ROUTE 列によって対象を絞り込みます。タスクの戻り値(下図の `= ...`)は、バッチ全体の状態(対象があるか、エージェントの上限を超えたか、担当者行きがあるか)によって、後続のタスクを動かすかどうかを切り替えるために使っています。
 
 ```mermaid
 flowchart TD
@@ -101,22 +103,17 @@ flowchart TD
 | `setup/01_synthetic_data.sql` | ワークシートで1回 | 合成データ(顧客・プラン・請求・API利用・障害・ヘルプ記事・チケット・正解ラベル) |
 | `setup/02_search_semantic_view_agent.sql` | ワークシートで1回 | Cortex Search(ヘルプ記事)、セマンティックビュー(顧客データ)、回答エージェント |
 | `setup/03_pipeline_objects.sql` | ワークシートで1回 | 設定値・出力テーブル・確認用ビュー |
-| `setup/04_procedures.sql` | ワークシートで1回 | 補助プロシージャ |
 | `setup/99_teardown.sql` | 検証後に1回 | `SUPPORT` スキーマなどを削除 |
-| `TEST_WORKFLOW/` | DCM プロジェクト | パイプライン本体(下記) |
-| `pipeline/inspect.sql` | ワークシート | 経路・回答・担当者キュー・評価指標の確認 |
-| `pipeline/scenarios.sql` | ワークシート | 検証シナリオの切り替え |
+| `AGENT_WORKFLOW/` | DCM プロジェクト | パイプライン本体(下記) |
 
-`TEST_WORKFLOW/` の中身:
+`AGENT_WORKFLOW/` の中身:
 
 | パス | 内容 |
 |---|---|
 | `manifest.yml` | DCM プロジェクト `DECISION_PIPE_DB.SUPPORT.TEST_WORKFLOW`(所有ロール `DECISION_PIPE_ROLE`)と、T30 のコードバンドル用アセット |
-| `sources/definitions/pipeline.yml` | タスクグラフ `T00_PICK_BATCH_graph`(root・finalizer・`task_defaults`)とコードバンドル `T30_CB` |
+| `sources/definitions/pipeline.yml` | タスクグラフ `SUPPORT_PROCESSING`(root・finalizer・`task_defaults`)とコードバンドル `T30_CB` |
 | `sources/definitions/tasks/T*.yml` | 各タスクの定義(前段・条件・SQL 本体) |
 | `bundles/t30/T30_AGENT_ANSWER.py` | T30 で実行する Python(エージェント呼び出し) |
-
-> `setup/05_decider_model.sql`、`setup/05b_*.ipynb` と、`pipeline/T*.sql` / `T30_AGENT_ANSWER.py` は旧構成(decider-2b・GUI に SQL カードを貼る方式)の資料です。現在のパイプラインでは使いません。
 
 ---
 
@@ -124,7 +121,7 @@ flowchart TD
 
 ### A. Snowflake のリソースを作る
 
-1. `setup/00` から `04` までを順にワークシートで実行する。
+1. `setup/00` から `03` までを順にワークシートで実行する。
    - `02` の Cortex Search はインデックスの作成に少し時間がかかります。動作確認の `SEARCH_PREVIEW` が空なら、少し待ってから再実行してください。
    - `02` の最後の `DATA_AGENT_RUN` で、エージェントが顧客データを照会して回答することを確認してください。
 2. `snowflake-decision` が使えることを確認する。
@@ -138,7 +135,7 @@ SELECT AI_COMPLETE(model => 'snowflake-decision', prompt => TO_JSON({
 
 ### B. パイプラインをデプロイする
 
-1. Workspaces で `TEST_WORKFLOW/` を開き、DCM プロジェクト `DECISION_PIPE_DB.SUPPORT.TEST_WORKFLOW` として **Plan** を実行する。
+1. Workspaces で `AGENT_WORKFLOW/` を開き、DCM プロジェクト `DECISION_PIPE_DB.SUPPORT.TEST_WORKFLOW` として **Plan** を実行する。
 2. Plan の結果(作成・変更・削除されるタスク)を確認してから **Deploy** する。
 
 グラフの設定(`pipeline.yml`):
@@ -155,10 +152,10 @@ SELECT AI_COMPLETE(model => 'snowflake-decision', prompt => TO_JSON({
 
 ```sql
 -- 通常実行(未処理の受付日を1日分)
-EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
+EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.SUPPORT_PROCESSING;
 
 -- 未処理日をまとめて処理
-EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH
+EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.SUPPORT_PROCESSING
   USING CONFIG = $${"batch_mode": "all"}$$;
 ```
 
@@ -168,7 +165,7 @@ EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH
 
 ```sql
 DELETE FROM DECISION_PIPE_DB.SUPPORT.BATCH_STATE WHERE RECEIVED_DATE = '2026-10-02';
-EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
+EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.SUPPORT_PROCESSING;
 ```
 
 ### 結果を見るテーブル
@@ -189,7 +186,12 @@ EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
 
 ### シナリオと期待する経路
 
-`PIPELINE_CONFIG` の値を変えてから実行します(`pipeline/scenarios.sql` を参照)。
+`PIPELINE_CONFIG` の値を変えてから実行します。
+
+```sql
+-- 例: 分類モデル障害のシナリオ
+UPDATE DECISION_PIPE_DB.SUPPORT.PIPELINE_CONFIG SET VALUE = 1 WHERE KEY = 'force_classify_failure';
+```
 
 | シナリオ | 設定 | 期待する経路 |
 |---|---|---|
@@ -224,20 +226,18 @@ EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
 - **human(約27%)**:返金依頼、請求金額への異議、不正ログインの疑い、データの即時削除と証明書、未知の不具合、解約をほのめかす苦情、値引き見積もり、DPA締結、唯一の管理者のロックアウト
 
 
-## 評価指標(`pipeline/inspect.sql`)
+## 評価指標(`RUN_SUMMARY`)
 
-| 指標 | 意味 | 目標 |
+T99 が実行ごとに `RUN_SUMMARY` へ記録します。正解ラベル(`TICKET_LABELS`)と突き合わせた値です。
+
+| 列 | 意味 | 目標 |
 |---|---|---|
-| `unsafe_automation` | 担当者が必要なのに自動で回答した件数 | **0** |
-| `human_recall` | 担当者が必要な問い合わせのうち、human に回せた割合 | 1.0 |
-| `automation_rate` | 自動で回答できる問い合わせのうち、実際に自動回答した割合 | 高いほど良い |
-| `category_acc` | 種類の分類の正解率 | - |
-| `kb_match` | 定型回答で選んだヘルプ記事が正解と一致した割合 | - |
-| `fact_hit` | 顧客データが必要な問い合わせの回答に、正しい値(金額・上限・復旧時刻など)が含まれた割合 | - |
+| `N_UNSAFE_AUTOMATION` | 担当者が必要なのに自動で回答した件数 | **0** |
+| `N_MISSED_AUTOMATION` | 自動で回答できたのに担当者に回した件数 | 少ないほど良い |
+| `N_AUTO` / `N_AGENT` / `N_HUMAN` | 最終経路ごとの件数 | - |
+| `CATEGORY_ACC` | 種類の分類の正解率 | - |
 
-`inspect.sql` の 11・12 は確率の較正(確率の帯ごとの実際の正解率)を見るクエリです。
-
-`fact_hit` は、回答の文字列に期待値が含まれるかだけを見る簡易判定です。「1万回」のような表記の揺れは不一致として数えます。
+確率の較正(確率の帯ごとの実際の割合)は、`CLASSIFY_RESULTS` の確率と `TICKET_LABELS` を突き合わせて確認してください。
 
 
 ## 調整ポイント(`PIPELINE_CONFIG`)
@@ -252,7 +252,7 @@ EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
 | `quality_min` / `resolves_min` / `risk_max` | 1.20 / 0.50 / 0.50 | 送信可の基準 |
 | `force_classify_failure` / `force_agent_failure` / `force_quality_failure` | 0 | 1 にすると T10 / T30 / T41 を強制的に失敗させる(フォールバックの確認用) |
 
-安全側に倒したい場合は `human_min` を下げ、自動化率を上げたい場合は `auto_conf_min` を下げます。どちらも `unsafe_automation` と見比べながら調整してください。
+安全側に倒したい場合は `human_min` を下げ、自動化率を上げたい場合は `auto_conf_min` を下げます。どちらも `N_UNSAFE_AUTOMATION` と見比べながら調整してください。
 
 > `translate_for_decider` は旧構成の英訳用で、現在はどのタスクも参照しません。`KB_TRANSLATIONS` / `TICKET_TRANSLATIONS` テーブルも使われていません。
 
@@ -263,7 +263,7 @@ EXECUTE TASK GRAPH DECISION_PIPE_DB.SUPPORT.T00_PICK_BATCH_GRAPH;
 **snowflake-decision について**
 - **choice の確信度**:`confidence` は最大確率をそのまま表す値ではありません(一様分布で0、1つに集中で1に近づく換算値)。ヘルプ記事は19択なので、`auto_conf_min = 0.8` の意味は実データの確率と見比べて調整してください。
 - **score の値**:`score` は段階の番号ではなく、確率で重み付けした期待値(0〜2の小数)で返ります。`quality_min = 1.2` はこの期待値に対する閾値です。
-- **noul の確率の分布**:`requires_human` などの確率は、旧モデルと分布が異なる可能性があります。`inspect.sql` の 11〜13 で確認し、`human_min` などの閾値を調整してください。
+- **noul の確率の分布**:`requires_human` などの確率は、旧モデルと分布が異なる可能性があります。実データの確率と正解ラベルを見比べて、`human_min` などの閾値を調整してください。
 
 **パイプライン全般**
 - **汎用LLMのモデル名(`claude-sonnet-5`)**:T11 / T40 / T42 / T50 で使っています。アカウントやリージョンで使えるものに置き換えてください。
