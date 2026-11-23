@@ -12,7 +12,7 @@ auto と agent の回答も品質チェックにかけます。基準を満た�
 
 分類(T10)と品質チェック(T41)には、Snowflake の判定モデル **`snowflake-decision`** を `AI_COMPLETE` から使います。choice / score / noul(真偽)の質問に対して選択肢ごとの確率を返すので、振り分けの閾値を確率で決められます。
 
-> Pipeline Builder は Private Preview、`snowflake-decision` は Public Preview です(2026-11-20 時点、[リリースノート](https://docs.snowflake.com/en/release-notes/2026/other/2026-11-20-ai-complete-snowflake-decision-public-preview))。利用の前に提供状況を確認してください。
+> Pipeline Builder は Public Preview、`snowflake-decision` は Public Preview です(2026-11-20 時点、[リリースノート](https://docs.snowflake.com/en/release-notes/2026/other/2026-11-20-ai-complete-snowflake-decision-public-preview))。利用の前に提供状況を確認してください。
 
 判定モデルが使えないとき(エラーや強制失敗のシナリオ)は、T11 / T42 が汎用LLM(`AI_COMPLETE` の構造化出力)で分類・採点し直します。
 日本企業での利用を想定し、問い合わせ・返信・顧客データ・ヘルプ記事はすべて日本語です。
